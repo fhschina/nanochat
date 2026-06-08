@@ -187,7 +187,7 @@ def main():
     parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
     parser.add_argument('--data-source', type=str, default='parquet', choices=['parquet', 'megatron'], help='Data source for BPB eval')
-    parser.add_argument('--data-dir', type=str, default='', help='(megatron only) directory containing .bin/.idx pairs')
+    parser.add_argument('--data-dir', type=str, default='', help='Data directory. For parquet: directory of nanochat-compatible .parquet shards. For megatron: directory containing .bin/.idx pairs')
     parser.add_argument('--domain-weights', type=str, default='proportional', help="(megatron only) 'proportional', 'uniform', JSON file path, or inline JSON")
     parser.add_argument('--train-fraction', type=float, default=0.99, help='(megatron only) fraction of each domain used for training')
     parser.add_argument('--pile-val-dir', type=str, default='', help='(megatron only) optional .bin/.idx directory for extra BPB eval')
@@ -276,9 +276,12 @@ def main():
         steps = args.split_tokens // tokens_per_step
 
         if args.data_source == "parquet":
+            parquet_data_dir = args.data_dir or None
+            if parquet_data_dir:
+                print0(f"Parquet data dir: {parquet_data_dir}")
             bpb_loaders = [
-                ("train", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "train", device=device)),
-                ("val", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "val", device=device)),
+                ("train", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "train", device=device, data_dir=parquet_data_dir)),
+                ("val", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "val", device=device, data_dir=parquet_data_dir)),
             ]
         else:
             if not args.data_dir:

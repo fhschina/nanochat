@@ -80,7 +80,7 @@ parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 # Data source
 parser.add_argument("--data-source", type=str, default="parquet", choices=["parquet", "megatron"], help="parquet=nanochat default (text+tokenizer); megatron=pre-tokenized .bin/.idx files")
-parser.add_argument("--data-dir", type=str, default="", help="(megatron only) directory containing .bin/.idx pairs; required when --data-source=megatron")
+parser.add_argument("--data-dir", type=str, default="", help="Data directory. For parquet: directory of nanochat-compatible .parquet shards. For megatron: directory containing .bin/.idx pairs.")
 parser.add_argument("--domain-weights", type=str, default="proportional", help="(megatron only) sampling weights across domains: 'proportional' (default), 'uniform', a JSON file path, or an inline JSON dict/list")
 parser.add_argument("--train-fraction", type=float, default=0.99, help="(megatron only) fraction of each domain's docs used for training; the rest is held out as val")
 parser.add_argument("--pile-val-dir", type=str, default="", help="(megatron only) optional second val source (e.g. pretokenized Pile val); reports val/bpb_pile alongside val/bpb")
@@ -337,8 +337,11 @@ if scaler is not None:
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
 build_pile_val_loader = None
 if args.data_source == "parquet":
-    train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
-    build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device)
+    parquet_data_dir = args.data_dir or None
+    if parquet_data_dir:
+        print0(f"Parquet data dir: {parquet_data_dir}")
+    train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, data_dir=parquet_data_dir)
+    build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device, data_dir=parquet_data_dir)
 elif args.data_source == "megatron":
     if not args.data_dir:
         raise ValueError("--data-source=megatron requires --data-dir")
