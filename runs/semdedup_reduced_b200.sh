@@ -51,7 +51,7 @@ python -m nanochat.report reset
 # Ensure the baseline ClimbMix shards/tokenizer exist. The SemDeDup output reuses
 # the original final validation shard and the same tokenizer for A/B comparison.
 python -m nanochat.dataset -n "$NUM_TRAIN_SHARDS"
-if [ ! -f "$NANOCHAT_BASE_DIR/tokenizer/tokenizer.json" ]; then
+if [ ! -f "$NANOCHAT_BASE_DIR/tokenizer/tokenizer.pkl" ] && [ ! -f "$NANOCHAT_BASE_DIR/tokenizer/tokenizer_kind.txt" ]; then
     python -m scripts.tok_train --data-dir "$INPUT_DATA_DIR"
 fi
 
