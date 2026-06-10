@@ -130,6 +130,31 @@ def _stage_train_inputs(train_paths: list[Path], staged_dir: Path, max_docs: int
     return {"docs": docs, "chars": chars, "bytes": bytes_, "files": files}
 
 
+def _preinit_local_ray(args) -> None:
+    if args.no_ray_preinit:
+        return
+    try:
+        import ray
+    except ImportError:
+        return
+    if ray.is_initialized():
+        return
+    ray_temp_dir = args.ray_temp_dir.expanduser().resolve()
+    ray_temp_dir.mkdir(parents=True, exist_ok=True)
+    ray.init(
+        address="local",
+        _temp_dir=str(ray_temp_dir),
+        include_dashboard=False,
+        ignore_reinit_error=True,
+        runtime_env={
+            "env_vars": {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+            }
+        },
+    )
+    print(f"Initialized isolated local Ray at {ray.get_runtime_context().gcs_address} (temp_dir={ray_temp_dir})")
+
+
 def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict:
     try:
         from nemo_curator.stages.text.deduplication.semantic import TextSemanticDeduplicationWorkflow
@@ -139,6 +164,8 @@ def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict
             "Install the text CUDA extra in a Curator-capable environment, for example: "
             "uv pip install --extra-index-url https://pypi.nvidia.com 'nemo-curator[text_cuda12]'"
         ) from exc
+
+    _preinit_local_ray(args)
 
     kwargs = {
         "input_path": str(staged_input_dir),
@@ -264,6 +291,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distance-metric", choices=["cosine", "l2"], default="cosine")
     parser.add_argument("--which-to-keep", choices=["hard", "easy", "random"], default="hard")
     parser.add_argument("--pairwise-batch-size", type=int, default=1024)
+    parser.add_argument("--ray-temp-dir", type=Path, default=None, help="Ray temp dir for an isolated local Curator/Xenna run")
+    parser.add_argument("--no-ray-preinit", action="store_true", help="Disable isolated local Ray pre-initialization")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -271,6 +300,8 @@ def parse_args() -> argparse.Namespace:
         args.output_data_dir = base_dir / f"base_data_climbmix_semdedup_eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
     if args.cache_dir is None:
         args.cache_dir = base_dir / "semdedup_cache" / f"eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
+    if args.ray_temp_dir is None:
+        args.ray_temp_dir = args.cache_dir / "ray"
     return args
 
 
