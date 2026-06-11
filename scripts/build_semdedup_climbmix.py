@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import shutil
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ import pyarrow.parquet as pq
 
 
 ROW_GROUP_SIZE = 1024
+QUANTILES = (0.0, 0.5, 0.9, 0.95, 0.99, 1.0)
 
 
 def _default_base_dir() -> Path:
@@ -36,26 +38,206 @@ def _parquet_files(path: Path) -> list[Path]:
     return sorted(p for p in path.iterdir() if p.suffix == ".parquet" and not p.name.endswith(".tmp"))
 
 
-def _count_texts(paths: list[Path]) -> dict:
+def _quantiles(values: list[int]) -> dict[str, int | float | None]:
+    if not values:
+        return {f"p{int(q * 100):02d}": None for q in QUANTILES}
+    values = sorted(values)
+    n = len(values)
+    out: dict[str, int | float | None] = {}
+    for q in QUANTILES:
+        idx = int(round(q * (n - 1)))
+        out[f"p{int(q * 100):02d}"] = values[idx]
+    out["mean"] = sum(values) / n
+    return out
+
+
+def _token_lengths(tokenizer, texts: list[str], batch_size: int, num_threads: int) -> list[int]:
+    if tokenizer is None:
+        return []
+    bos = tokenizer.get_bos_token_id()
+    lengths: list[int] = []
+    for offset in range(0, len(texts), batch_size):
+        batch = texts[offset : offset + batch_size]
+        tokenized = tokenizer.encode(batch, prepend=bos, num_threads=num_threads)
+        lengths.extend(len(tokens) for tokens in tokenized)
+    return lengths
+
+
+def _count_texts(paths: list[Path], tokenizer=None, tokenizer_batch_size: int = 128, tokenizer_threads: int = 4) -> dict:
     docs = 0
     chars = 0
+    tokens = 0 if tokenizer is not None else None
     bytes_ = 0
     files = []
+    char_lengths: list[int] = []
+    token_lengths_all: list[int] = []
+
     for path in paths:
         pf = pq.ParquetFile(path)
         file_docs = 0
         file_chars = 0
+        file_tokens = 0 if tokenizer is not None else None
         for rg_idx in range(pf.num_row_groups):
             table = pf.read_row_group(rg_idx, columns=["text"])
-            texts = table.column("text").to_pylist()
+            texts = [(text or "") for text in table.column("text").to_pylist()]
+            lengths = [len(text) for text in texts]
+            token_lengths = _token_lengths(tokenizer, texts, tokenizer_batch_size, tokenizer_threads)
+
             file_docs += len(texts)
-            file_chars += sum(len(text or "") for text in texts)
+            file_chars += sum(lengths)
+            char_lengths.extend(lengths)
+            if tokenizer is not None:
+                batch_tokens = sum(token_lengths)
+                file_tokens += batch_tokens
+                tokens += batch_tokens
+                token_lengths_all.extend(token_lengths)
+
         size = path.stat().st_size
         docs += file_docs
         chars += file_chars
         bytes_ += size
-        files.append({"file": path.name, "docs": file_docs, "chars": file_chars, "bytes": size})
-    return {"docs": docs, "chars": chars, "bytes": bytes_, "files": files}
+        file_stats = {"file": path.name, "docs": file_docs, "chars": file_chars, "bytes": size}
+        if tokenizer is not None:
+            file_stats["tokens"] = file_tokens
+        files.append(file_stats)
+
+    stats = {
+        "docs": docs,
+        "chars": chars,
+        "bytes": bytes_,
+        "files": files,
+        "char_length_quantiles": _quantiles(char_lengths),
+    }
+    if tokenizer is not None:
+        stats["tokens"] = tokens
+        stats["token_length_quantiles"] = _quantiles(token_lengths_all)
+    return stats
+
+
+def _column_names(path: Path) -> list[str]:
+    return pq.ParquetFile(path).schema_arrow.names
+
+
+def _collect_doc_ids(paths: list[Path]) -> set[str] | None:
+    ids: set[str] = set()
+    for path in paths:
+        if "doc_id" not in _column_names(path):
+            return None
+        pf = pq.ParquetFile(path)
+        for rg_idx in range(pf.num_row_groups):
+            table = pf.read_row_group(rg_idx, columns=["doc_id"])
+            ids.update(str(doc_id) for doc_id in table.column("doc_id").to_pylist())
+    return ids
+
+
+def _write_id_file(path: Path, ids: set[str]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for doc_id in sorted(ids):
+            f.write(f"{doc_id}\n")
+
+
+def _sample_ids(ids: set[str], sample_size: int, seed: int) -> set[str]:
+    if sample_size <= 0 or not ids:
+        return set()
+    rng = random.Random(seed)
+    ordered = sorted(ids)
+    if len(ordered) <= sample_size:
+        return set(ordered)
+    return set(rng.sample(ordered, sample_size))
+
+
+def _write_sample_records(
+    staged_paths: list[Path],
+    sample_ids: set[str],
+    output_path: Path,
+    tokenizer=None,
+    tokenizer_batch_size: int = 128,
+    tokenizer_threads: int = 4,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wanted = set(sample_ids)
+    written = 0
+    with output_path.open("w", encoding="utf-8") as f:
+        if not wanted:
+            return 0
+        for path in staged_paths:
+            if "doc_id" not in _column_names(path):
+                continue
+            pf = pq.ParquetFile(path)
+            for rg_idx in range(pf.num_row_groups):
+                table = pf.read_row_group(rg_idx, columns=["doc_id", "text"])
+                ids = [str(doc_id) for doc_id in table.column("doc_id").to_pylist()]
+                texts = [(text or "") for text in table.column("text").to_pylist()]
+                for doc_id, text in zip(ids, texts):
+                    if doc_id not in wanted:
+                        continue
+                    token_len = None
+                    if tokenizer is not None:
+                        token_len = len(tokenizer.encode(text, prepend=tokenizer.get_bos_token_id(), num_threads=tokenizer_threads))
+                    preview = " ".join(text[:1000].split())
+                    rec = {
+                        "doc_id": doc_id,
+                        "source_file": doc_id.split(":", 1)[0],
+                        "char_len": len(text),
+                        "token_len": token_len,
+                        "text_preview": preview,
+                    }
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    written += 1
+                    wanted.remove(doc_id)
+                if not wanted:
+                    return written
+    return written
+
+
+def _write_analysis_artifacts(
+    staged_paths: list[Path],
+    dedup_dir: Path,
+    analysis_dir: Path,
+    tokenizer,
+    audit_sample_size: int,
+    audit_seed: int,
+    tokenizer_batch_size: int,
+    tokenizer_threads: int,
+) -> dict:
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    dedup_paths = sorted(dedup_dir.rglob("*.parquet"))
+    kept_ids = _collect_doc_ids(dedup_paths)
+    input_ids = _collect_doc_ids(staged_paths)
+    if kept_ids is None or input_ids is None:
+        return {
+            "doc_id_available": False,
+            "reason": "doc_id column missing from staged input or deduplicated output",
+        }
+
+    removed_ids = input_ids - kept_ids
+    kept_ids_path = analysis_dir / "kept_ids.txt"
+    removed_ids_path = analysis_dir / "removed_ids.txt"
+    _write_id_file(kept_ids_path, kept_ids)
+    _write_id_file(removed_ids_path, removed_ids)
+
+    kept_sample = _sample_ids(kept_ids, audit_sample_size, audit_seed)
+    removed_sample = _sample_ids(removed_ids, audit_sample_size, audit_seed + 1)
+    kept_samples_path = analysis_dir / "kept_samples.jsonl"
+    removed_samples_path = analysis_dir / "removed_samples.jsonl"
+    kept_written = _write_sample_records(
+        staged_paths, kept_sample, kept_samples_path, tokenizer, tokenizer_batch_size, tokenizer_threads
+    )
+    removed_written = _write_sample_records(
+        staged_paths, removed_sample, removed_samples_path, tokenizer, tokenizer_batch_size, tokenizer_threads
+    )
+
+    return {
+        "doc_id_available": True,
+        "kept_ids_path": str(kept_ids_path),
+        "removed_ids_path": str(removed_ids_path),
+        "kept_samples_path": str(kept_samples_path),
+        "removed_samples_path": str(removed_samples_path),
+        "kept_ids": len(kept_ids),
+        "removed_ids": len(removed_ids),
+        "kept_sample_count": kept_written,
+        "removed_sample_count": removed_written,
+    }
 
 
 def _select_train_val(input_data_dir: Path, num_train_shards: int) -> tuple[list[Path], Path]:
@@ -241,7 +423,15 @@ def _find_curator_dedup_dir(curator_output_dir: Path) -> Path:
     raise FileNotFoundError(f"Could not find deduplicated parquet output under {curator_output_dir}")
 
 
-def _normalize_to_nanochat(dedup_dir: Path, val_path: Path, output_data_dir: Path, overwrite: bool) -> dict:
+def _normalize_to_nanochat(
+    dedup_dir: Path,
+    val_path: Path,
+    output_data_dir: Path,
+    overwrite: bool,
+    tokenizer=None,
+    tokenizer_batch_size: int = 128,
+    tokenizer_threads: int = 4,
+) -> dict:
     _reset_dir(output_data_dir, overwrite=overwrite)
     dedup_paths = sorted(dedup_dir.rglob("*.parquet"))
     if not dedup_paths:
@@ -268,10 +458,11 @@ def _normalize_to_nanochat(dedup_dir: Path, val_path: Path, output_data_dir: Pat
     if not train_out_paths:
         raise ValueError("Normalized train output contains zero parquet files")
 
-    shutil.copy2(val_path, output_data_dir / val_path.name)
-    train_stats = _count_texts(train_out_paths)
-    val_stats = _count_texts([output_data_dir / val_path.name])
-    return {"train": train_stats, "val": val_stats}
+    val_output_path = output_data_dir / f"shard_{len(train_out_paths):05d}.parquet"
+    shutil.copy2(val_path, val_output_path)
+    train_stats = _count_texts(train_out_paths, tokenizer, tokenizer_batch_size, tokenizer_threads)
+    val_stats = _count_texts([val_output_path], tokenizer, tokenizer_batch_size, tokenizer_threads)
+    return {"train": train_stats, "val": val_stats, "val_output_file": val_output_path.name}
 
 
 def parse_args() -> argparse.Namespace:
@@ -280,6 +471,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-data-dir", type=Path, default=base_dir / "base_data_climbmix")
     parser.add_argument("--output-data-dir", type=Path, default=None)
     parser.add_argument("--cache-dir", type=Path, default=None)
+    parser.add_argument("--analysis-output-dir", type=Path, default=None, help="Directory for SemDeDup audit artifacts and an extra manifest copy")
     parser.add_argument("--num-train-shards", type=int, default=8, help="Number of train shards to process; -1 means all available train shards")
     parser.add_argument("--max-docs", type=int, default=-1, help="Optional cap for smoke/pilot runs; -1 means no cap")
     parser.add_argument("--backend", choices=["curator", "exact-smoke"], default="curator")
@@ -291,6 +483,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distance-metric", choices=["cosine", "l2"], default="cosine")
     parser.add_argument("--which-to-keep", choices=["hard", "easy", "random"], default="hard")
     parser.add_argument("--pairwise-batch-size", type=int, default=1024)
+    parser.add_argument("--audit-sample-size", type=int, default=100, help="Number of kept/removed docs to sample for manual inspection")
+    parser.add_argument("--audit-seed", type=int, default=1337, help="Seed for deterministic audit samples")
+    parser.add_argument("--tokenizer-batch-size", type=int, default=128)
+    parser.add_argument("--tokenizer-threads", type=int, default=4)
+    parser.add_argument("--skip-token-stats", action="store_true", help="Skip tokenizer-based token stats for fast plumbing checks")
     parser.add_argument("--ray-temp-dir", type=Path, default=None, help="Ray temp dir for an isolated local Curator/Xenna run")
     parser.add_argument("--no-ray-preinit", action="store_true", help="Disable isolated local Ray pre-initialization")
     parser.add_argument("--overwrite", action="store_true")
@@ -300,6 +497,8 @@ def parse_args() -> argparse.Namespace:
         args.output_data_dir = base_dir / f"base_data_climbmix_semdedup_eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
     if args.cache_dir is None:
         args.cache_dir = base_dir / "semdedup_cache" / f"eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
+    if args.analysis_output_dir is None:
+        args.analysis_output_dir = args.output_data_dir
     if args.ray_temp_dir is None:
         args.ray_temp_dir = args.cache_dir / "ray"
     return args
@@ -310,7 +509,15 @@ def main() -> None:
     args.input_data_dir = args.input_data_dir.expanduser().resolve()
     args.output_data_dir = args.output_data_dir.expanduser().resolve()
     args.cache_dir = args.cache_dir.expanduser().resolve()
+    args.analysis_output_dir = args.analysis_output_dir.expanduser().resolve()
     args.cache_dir.mkdir(parents=True, exist_ok=True)
+    args.analysis_output_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer = None
+    if not args.skip_token_stats:
+        from nanochat.tokenizer import get_tokenizer
+
+        tokenizer = get_tokenizer()
 
     train_paths, val_path = _select_train_val(args.input_data_dir, args.num_train_shards)
     staged_input_dir = args.cache_dir / "input_with_ids"
@@ -323,7 +530,12 @@ def main() -> None:
     print(f"Cache dir: {args.cache_dir}")
 
     input_stats = _stage_train_inputs(train_paths, staged_input_dir, args.max_docs, overwrite=args.overwrite)
+    staged_paths = _parquet_files(staged_input_dir)
+    if tokenizer is not None:
+        input_stats = _count_texts(staged_paths, tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
     print(f"Staged {input_stats['docs']:,} docs / {input_stats['chars']:,} chars")
+    if tokenizer is not None:
+        print(f"Staged token count: {input_stats['tokens']:,}")
 
     backend_result = None
     if args.backend == "curator":
@@ -334,10 +546,35 @@ def main() -> None:
         backend_result = _run_exact_smoke(staged_input_dir, exact_output_dir, overwrite=args.overwrite)
         dedup_dir = exact_output_dir
 
-    output_stats = _normalize_to_nanochat(dedup_dir, val_path, args.output_data_dir, overwrite=args.overwrite)
+    analysis_artifacts = _write_analysis_artifacts(
+        staged_paths,
+        dedup_dir,
+        args.analysis_output_dir,
+        tokenizer,
+        args.audit_sample_size,
+        args.audit_seed,
+        args.tokenizer_batch_size,
+        args.tokenizer_threads,
+    )
+    output_stats = _normalize_to_nanochat(
+        dedup_dir,
+        val_path,
+        args.output_data_dir,
+        overwrite=args.overwrite,
+        tokenizer=tokenizer,
+        tokenizer_batch_size=args.tokenizer_batch_size,
+        tokenizer_threads=args.tokenizer_threads,
+    )
     train_out = output_stats["train"]
     keep_ratio_docs = train_out["docs"] / input_stats["docs"] if input_stats["docs"] else None
     keep_ratio_chars = train_out["chars"] / input_stats["chars"] if input_stats["chars"] else None
+    keep_ratio_tokens = None
+    removed_tokens = None
+    if "tokens" in input_stats and "tokens" in train_out and input_stats["tokens"]:
+        keep_ratio_tokens = train_out["tokens"] / input_stats["tokens"]
+        removed_tokens = input_stats["tokens"] - train_out["tokens"]
+    removed_docs = input_stats["docs"] - train_out["docs"]
+    removed_chars = input_stats["chars"] - train_out["chars"]
 
     manifest = {
         "backend": args.backend,
@@ -346,6 +583,7 @@ def main() -> None:
         "input_data_dir": str(args.input_data_dir),
         "output_data_dir": str(args.output_data_dir),
         "cache_dir": str(args.cache_dir),
+        "analysis_output_dir": str(args.analysis_output_dir),
         "train_files": [p.name for p in train_paths],
         "val_file": val_path.name,
         "curator_config": {
@@ -357,17 +595,39 @@ def main() -> None:
             "pairwise_batch_size": args.pairwise_batch_size,
             "embedding_max_chars": args.embedding_max_chars,
         },
+        "token_stats": {
+            "enabled": tokenizer is not None,
+            "include_bos_per_document": True,
+            "tokenizer_batch_size": args.tokenizer_batch_size,
+            "tokenizer_threads": args.tokenizer_threads,
+        },
         "input_train": input_stats,
         "output_train": train_out,
         "output_val": output_stats["val"],
+        "output_val_file": output_stats.get("val_output_file"),
+        "removed_docs": removed_docs,
+        "removed_chars": removed_chars,
+        "removed_tokens": removed_tokens,
         "keep_ratio_docs": keep_ratio_docs,
         "keep_ratio_chars": keep_ratio_chars,
+        "keep_ratio_tokens": keep_ratio_tokens,
+        "analysis_artifacts": analysis_artifacts,
+        "elapsed_sec": backend_result.get("elapsed_sec") if isinstance(backend_result, dict) else None,
         "backend_result": backend_result,
     }
     manifest_path = args.output_data_dir / "semdedup_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    manifest_json = json.dumps(manifest, indent=2, sort_keys=True)
+    manifest_path.write_text(manifest_json)
+    analysis_manifest_path = args.analysis_output_dir / "semdedup_manifest.json"
+    if analysis_manifest_path != manifest_path:
+        analysis_manifest_path.write_text(manifest_json)
     print(f"Wrote manifest: {manifest_path}")
-    print(f"Train keep ratio: docs={keep_ratio_docs:.4f} chars={keep_ratio_chars:.4f}")
+    if analysis_manifest_path != manifest_path:
+        print(f"Wrote analysis manifest: {analysis_manifest_path}")
+    keep_msg = f"Train keep ratio: docs={keep_ratio_docs:.4f} chars={keep_ratio_chars:.4f}"
+    if keep_ratio_tokens is not None:
+        keep_msg += f" tokens={keep_ratio_tokens:.4f}"
+    print(keep_msg)
 
 
 if __name__ == "__main__":
