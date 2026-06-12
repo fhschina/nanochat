@@ -365,6 +365,20 @@ def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict
     }
     if args.embedding_max_chars is not None:
         kwargs["embedding_max_chars"] = args.embedding_max_chars
+    vllm_init_kwargs = _load_json_object(
+        args.embedding_vllm_init_kwargs_json,
+        "--embedding-vllm-init-kwargs-json",
+    )
+    if args.embedding_enforce_eager:
+        vllm_init_kwargs["enforce_eager"] = True
+    if args.embedding_attention_backend:
+        attention_config = vllm_init_kwargs.get("attention_config", {})
+        if not isinstance(attention_config, dict):
+            raise ValueError("embedding_vllm_init_kwargs_json.attention_config must be an object")
+        attention_config["backend"] = args.embedding_attention_backend
+        vllm_init_kwargs["attention_config"] = attention_config
+    if vllm_init_kwargs:
+        kwargs["embedding_vllm_init_kwargs"] = vllm_init_kwargs
     if args.model_cache_dir:
         kwargs["model_cache_dir"] = args.model_cache_dir
 
@@ -374,6 +388,18 @@ def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict
     elapsed = time.time() - t0
     metadata = getattr(result, "metadata", None)
     return {"elapsed_sec": elapsed, "metadata": metadata}
+
+
+def _load_json_object(value: str, flag_name: str) -> dict:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{flag_name} must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{flag_name} must decode to a JSON object")
+    return payload
 
 
 def _run_exact_smoke(staged_input_dir: Path, dedup_dir: Path, overwrite: bool) -> dict:
@@ -478,6 +504,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-identifier", type=str, default="google/embeddinggemma-300m")
     parser.add_argument("--model-cache-dir", type=str, default="")
     parser.add_argument("--embedding-max-chars", type=int, default=None)
+    parser.add_argument(
+        "--embedding-vllm-init-kwargs-json",
+        type=str,
+        default="",
+        help="JSON object passed to Curator's embedding_vllm_init_kwargs for vLLM LLM(...) initialization",
+    )
+    parser.add_argument(
+        "--embedding-attention-backend",
+        type=str,
+        default="",
+        help="Optional vLLM attention backend, for example FLASHINFER or TRITON_ATTN",
+    )
+    parser.add_argument(
+        "--embedding-enforce-eager",
+        action="store_true",
+        help="Pass enforce_eager=True to vLLM embedding initialization",
+    )
     parser.add_argument("--n-clusters", type=int, default=100)
     parser.add_argument("--eps", type=float, default=0.07)
     parser.add_argument("--distance-metric", choices=["cosine", "l2"], default="cosine")
@@ -594,6 +637,9 @@ def main() -> None:
             "which_to_keep": args.which_to_keep,
             "pairwise_batch_size": args.pairwise_batch_size,
             "embedding_max_chars": args.embedding_max_chars,
+            "embedding_attention_backend": args.embedding_attention_backend or None,
+            "embedding_enforce_eager": args.embedding_enforce_eager,
+            "embedding_vllm_init_kwargs_json": args.embedding_vllm_init_kwargs_json or None,
         },
         "token_stats": {
             "enabled": tokenizer is not None,
