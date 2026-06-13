@@ -206,19 +206,19 @@ train_log = read(run_dir / "train.log")
 eval_log = read(run_dir / "base_eval.log")
 val_curve = [
     {"step": int(step), "bpb": float(bpb)}
-    for step, bpb in re.findall(r"Step\\s+(\\d+)\\s+\\|\\s+Validation bpb:\\s+([0-9.]+)", train_log)
+    for step, bpb in re.findall(r"Step\s+(\d+)\s+\|\s+Validation bpb:\s+([0-9.]+)", train_log)
 ]
 core_curve = [
     {"step": int(step), "core": float(core)}
-    for step, core in re.findall(r"Step\\s+(\\d+)\\s+\\|\\s+CORE metric:\\s+([0-9.]+)", train_log)
+    for step, core in re.findall(r"Step\s+(\d+)\s+\|\s+CORE metric:\s+([0-9.]+)", train_log)
 ]
 num_iterations = (
-    last_int(r"Calculated number of iterations[^:]*:\\s+([0-9,]+)", train_log)
-    or last_int(r"Using user-provided number of iterations:\\s+([0-9,]+)", train_log)
+    last_int(r"Calculated number of iterations.*:\s+([0-9,]+)", train_log)
+    or last_int(r"Using user-provided number of iterations:\s+([0-9,]+)", train_log)
 )
-total_training_tokens = last_int(r"Total number of training tokens:\\s+([0-9,]+)", train_log)
-total_training_time_min = last_float(r"Total training time:\\s+([0-9.]+)m", train_log)
-final_core = last_float(r"CORE metric:\\s+([0-9.]+)", eval_log) or (core_curve[-1]["core"] if core_curve else None)
+total_training_tokens = last_int(r"Total number of training tokens:\s+([0-9,]+)", train_log)
+total_training_time_min = last_float(r"Total training time:\s+([0-9.]+)m", train_log)
+final_core = last_float(r"CORE metric:\s+([0-9.]+)", eval_log) or (core_curve[-1]["core"] if core_curve else None)
 
 summary = {
     "run_kind": os.environ["RUN_KIND"],
@@ -241,10 +241,10 @@ summary = {
         "num_iterations": num_iterations,
         "total_training_tokens": total_training_tokens,
         "total_training_time_sec": total_training_time_min * 60 if total_training_time_min is not None else None,
-        "min_val_bpb": last_float(r"Minimum validation bpb:\\s+([0-9.]+)", train_log),
+        "min_val_bpb": last_float(r"Minimum validation bpb:\s+([0-9.]+)", train_log),
         "final_train_val_bpb": val_curve[-1]["bpb"] if val_curve else None,
-        "base_eval_train_bpb": last_float(r"^train bpb:\\s+([0-9.]+)", eval_log),
-        "base_eval_val_bpb": last_float(r"^val bpb:\\s+([0-9.]+)", eval_log),
+        "base_eval_train_bpb": last_float(r"^train bpb:\s+([0-9.]+)", eval_log),
+        "base_eval_val_bpb": last_float(r"^val bpb:\s+([0-9.]+)", eval_log),
         "final_core": final_core,
     },
     "curves": {
