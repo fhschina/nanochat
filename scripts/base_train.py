@@ -44,6 +44,7 @@ parser = argparse.ArgumentParser(description="Pretrain base model")
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--seed", type=int, default=42, help="Global random seed for training setup and model initialization")
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
@@ -74,6 +75,7 @@ parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bp
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
 parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluate CORE metric every N steps (-1 = disable)")
 parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric")
+parser.add_argument("--core-eval-seed", type=int, default=1337, help="Shuffle seed used before optional CORE subsampling")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
@@ -90,7 +92,7 @@ user_config = vars(args).copy()  # for logging
 # Compute init and wandb logging
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type, seed=args.seed)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -487,7 +489,7 @@ while True:
     if args.core_metric_every > 0 and (last_step or (step > 0 and step % args.core_metric_every == 0)):
         model.eval()
         with disable_fp8(orig_model):
-            results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
+            results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task, core_eval_seed=args.core_eval_seed)
         print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
         wandb_run.log({
             "step": step,

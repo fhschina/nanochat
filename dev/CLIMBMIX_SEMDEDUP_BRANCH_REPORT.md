@@ -489,3 +489,22 @@ Recommended next checks:
 - If W&B is needed after offline runs, use `WANDB_MODE=offline` and then
   `wandb sync`, instead of `WANDB_RUN=dummy`.
 
+## Follow-Up Task-Delta Investigation
+
+The recommended follow-up checks were implemented and run after the initial
+Phase 4-style baseline vs SemDeDup comparison. See
+`dev/CLIMBMIX_SEMDEDUP_TASK_DELTA_FINAL_REPORT.md` for the final investigation
+summary.
+
+Short version:
+
+- Eval-only repeats were deterministic for the checked checkpoints.
+- Random-drop controls did not fully explain the large `commonsense_qa`
+  improvement under SemDeDup eps0.07.
+- `winogrande` weakened under both random drop and SemDeDup, so that movement
+  remains consistent with generic data-removal or seed-sensitive effects.
+- eps0.07 was the best SemDeDup threshold among the tried values for aggregate
+  CORE, but the gain was small and BPB was slightly worse.
+- The current evidence supports reporting a task-level redistribution signal,
+  not a robust aggregate quality or training-efficiency win.
+

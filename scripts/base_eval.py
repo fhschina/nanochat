@@ -105,7 +105,7 @@ def place_eval_bundle(file_path):
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
 
-def evaluate_core(model, tokenizer, device, max_per_task=-1):
+def evaluate_core(model, tokenizer, device, max_per_task=-1, core_eval_seed=1337):
     """
     Evaluate a base model on the CORE benchmark.
     Returns dict with results, centered_results, and core_metric.
@@ -152,7 +152,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
             data = [json.loads(line.strip()) for line in f]
 
         # Shuffle for consistent subsampling when using max_per_task
-        shuffle_rng = random.Random(1337)
+        shuffle_rng = random.Random(core_eval_seed)
         shuffle_rng.shuffle(data)
         if max_per_task > 0:
             data = data[:max_per_task]
@@ -186,6 +186,8 @@ def main():
     parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
     parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
+    parser.add_argument('--seed', type=int, default=42, help='Global random seed for eval setup')
+    parser.add_argument('--core-eval-seed', type=int, default=1337, help='Shuffle seed used before optional CORE subsampling')
     parser.add_argument('--data-source', type=str, default='parquet', choices=['parquet', 'megatron'], help='Data source for BPB eval')
     parser.add_argument('--data-dir', type=str, default='', help='Data directory. For parquet: directory of nanochat-compatible .parquet shards. For megatron: directory containing .bin/.idx pairs')
     parser.add_argument('--domain-weights', type=str, default='proportional', help="(megatron only) 'proportional', 'uniform', JSON file path, or inline JSON")
@@ -202,7 +204,7 @@ def main():
 
     # Distributed / precision setup
     device_type = autodetect_device_type() if args.device_type == '' else args.device_type
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type, seed=args.seed)
     # Load model and tokenizer
     is_hf_model = args.hf_path is not None
     if is_hf_model:
@@ -315,7 +317,7 @@ def main():
         print0("\n" + "="*80)
         print0("CORE Evaluation")
         print0("="*80)
-        core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task)
+        core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task, core_eval_seed=args.core_eval_seed)
 
         # Write CSV output
         if ddp_rank == 0:

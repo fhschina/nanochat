@@ -5,6 +5,7 @@
 # Modes:
 #   bash runs/climbmix_semdedup_quality_b200.sh baseline
 #   bash runs/climbmix_semdedup_quality_b200.sh semdedup
+#   bash runs/climbmix_semdedup_quality_b200.sh randomdrop
 #   bash runs/climbmix_semdedup_quality_b200.sh both
 #
 # This script only runs base pretraining + base evaluation. It intentionally
@@ -13,13 +14,14 @@
 set -euo pipefail
 
 MODE="${1:-}"
-if [[ "$MODE" != "baseline" && "$MODE" != "semdedup" && "$MODE" != "both" ]]; then
-    echo "Usage: $0 baseline|semdedup|both" >&2
+if [[ "$MODE" != "baseline" && "$MODE" != "semdedup" && "$MODE" != "randomdrop" && "$MODE" != "both" ]]; then
+    echo "Usage: $0 baseline|semdedup|randomdrop|both" >&2
     exit 2
 fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
+export WANDB_MODE="${WANDB_MODE:-offline}"
 export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat_b200_climbmix}"
 mkdir -p "$NANOCHAT_BASE_DIR"
 
@@ -47,6 +49,7 @@ RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 DO_TRAIN="${DO_TRAIN:-1}"
 DO_EVAL="${DO_EVAL:-1}"
 DO_SEMDEDUP="${DO_SEMDEDUP:-1}"
+DO_RANDOM_DROP="${DO_RANDOM_DROP:-1}"
 PREP_DATASET="${PREP_DATASET:-1}"
 SKIP_UV_SYNC="${SKIP_UV_SYNC:-0}"
 INSTALL_CURATOR="${INSTALL_CURATOR:-0}"
@@ -71,6 +74,12 @@ AUDIT_SAMPLE_SIZE="${AUDIT_SAMPLE_SIZE:-100}"
 AUDIT_SEED="${AUDIT_SEED:-1337}"
 SKIP_TOKEN_STATS="${SKIP_TOKEN_STATS:-0}"
 
+RANDOM_DROP_REMOVED_DOCS="${RANDOM_DROP_REMOVED_DOCS:-291374}"
+RANDOM_DROP_SEED="${RANDOM_DROP_SEED:-9001}"
+RANDOM_DROP_OVERWRITE="${RANDOM_DROP_OVERWRITE:-0}"
+
+SEED="${SEED:-42}"
+CORE_EVAL_SEED="${CORE_EVAL_SEED:-1337}"
 EVAL_EVERY="${EVAL_EVERY:-250}"
 EVAL_TOKENS="${EVAL_TOKENS:-41943040}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:-2000}"
@@ -81,13 +90,15 @@ SAMPLE_EVERY="${SAMPLE_EVERY:--1}"
 SAVE_EVERY="${SAVE_EVERY:--1}"
 TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-128}"
 TOKENIZER_THREADS="${TOKENIZER_THREADS:-4}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export NUM_GPUS DEVICE_BATCH_SIZE DEPTH PARAM_DATA_RATIO NUM_ITERATIONS NUM_TRAIN_SHARDS DATASET_SHARDS MAX_DOCS
 export SEMD_BACKEND SEMD_MODEL SEMD_EPS SEMD_N_CLUSTERS SEMD_DISTANCE_METRIC SEMD_WHICH_TO_KEEP
 export SEMD_PAIRWISE_BATCH_SIZE SEMD_EMBEDDING_MAX_CHARS SEMD_VLLM_INIT_KWARGS_JSON
 export SEMD_VLLM_ATTENTION_BACKEND SEMD_VLLM_ENFORCE_EAGER SEMD_RAY_TEMP_DIR SEMD_NO_RAY_PREINIT
-export EVAL_EVERY EVAL_TOKENS CORE_METRIC_EVERY CORE_METRIC_MAX_PER_TASK FINAL_CORE_MAX_PER_TASK BASE_EVAL_MODES
-export DO_TRAIN DO_EVAL DO_SEMDEDUP
+export RANDOM_DROP_REMOVED_DOCS RANDOM_DROP_SEED RANDOM_DROP_OVERWRITE
+export SEED CORE_EVAL_SEED EVAL_EVERY EVAL_TOKENS CORE_METRIC_EVERY CORE_METRIC_MAX_PER_TASK FINAL_CORE_MAX_PER_TASK BASE_EVAL_MODES
+export DO_TRAIN DO_EVAL DO_SEMDEDUP DO_RANDOM_DROP PYTHON_BIN
 
 command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 [ -d ".venv" ] || uv venv
@@ -100,10 +111,10 @@ if [[ "$INSTALL_CURATOR" == "1" ]]; then
 fi
 
 if [[ "$PREP_DATASET" == "1" ]]; then
-    python -m nanochat.dataset -n "$DATASET_SHARDS"
+    "$PYTHON_BIN" -m nanochat.dataset -n "$DATASET_SHARDS"
 fi
 if [[ ! -f "$NANOCHAT_BASE_DIR/tokenizer/tokenizer.pkl" && ! -f "$NANOCHAT_BASE_DIR/tokenizer/tokenizer_kind.txt" ]]; then
-    python -m scripts.tok_train --data-dir "$INPUT_DATA_DIR"
+    "$PYTHON_BIN" -m scripts.tok_train --data-dir "$INPUT_DATA_DIR"
 fi
 
 mkdir -p "$RUN_ROOT"
@@ -115,22 +126,24 @@ write_run_config() {
     local data_dir="$4"
     local model_tag="$5"
     RUN_KIND="$run_kind" RUN_ID_VALUE="$run_id" RUN_DIR_VALUE="$run_dir" DATA_DIR_VALUE="$data_dir" MODEL_TAG_VALUE="$model_tag" \
-    python - <<'PY'
+    "$PYTHON_BIN" - <<'PY'
 import json
 import os
 from pathlib import Path
 
 keys = [
     "RUN_KIND", "RUN_ID_VALUE", "RUN_DIR_VALUE", "DATA_DIR_VALUE", "MODEL_TAG_VALUE",
-    "NANOCHAT_BASE_DIR", "NUM_GPUS", "DEVICE_BATCH_SIZE", "DEPTH", "PARAM_DATA_RATIO",
+    "NANOCHAT_BASE_DIR", "WANDB_MODE", "NUM_GPUS", "DEVICE_BATCH_SIZE", "DEPTH", "PARAM_DATA_RATIO",
     "NUM_ITERATIONS", "NUM_TRAIN_SHARDS", "DATASET_SHARDS", "MAX_DOCS",
     "SEMD_BACKEND", "SEMD_MODEL", "SEMD_EPS", "SEMD_N_CLUSTERS",
     "SEMD_DISTANCE_METRIC", "SEMD_WHICH_TO_KEEP", "SEMD_PAIRWISE_BATCH_SIZE",
     "SEMD_EMBEDDING_MAX_CHARS", "SEMD_VLLM_INIT_KWARGS_JSON",
     "SEMD_VLLM_ATTENTION_BACKEND", "SEMD_VLLM_ENFORCE_EAGER",
-    "SEMD_RAY_TEMP_DIR", "SEMD_NO_RAY_PREINIT", "EVAL_EVERY", "EVAL_TOKENS",
-    "CORE_METRIC_EVERY", "CORE_METRIC_MAX_PER_TASK", "FINAL_CORE_MAX_PER_TASK",
-    "BASE_EVAL_MODES", "DO_TRAIN", "DO_EVAL", "DO_SEMDEDUP",
+    "SEMD_RAY_TEMP_DIR", "SEMD_NO_RAY_PREINIT", "RANDOM_DROP_REMOVED_DOCS",
+    "RANDOM_DROP_SEED", "RANDOM_DROP_OVERWRITE", "SEED", "CORE_EVAL_SEED",
+    "EVAL_EVERY", "EVAL_TOKENS", "CORE_METRIC_EVERY", "CORE_METRIC_MAX_PER_TASK",
+    "FINAL_CORE_MAX_PER_TASK", "BASE_EVAL_MODES", "DO_TRAIN", "DO_EVAL",
+    "DO_SEMDEDUP", "DO_RANDOM_DROP",
 ]
 payload = {key: os.environ.get(key) for key in keys}
 payload["run_kind"] = payload.pop("RUN_KIND")
@@ -151,7 +164,7 @@ write_run_summary() {
     local data_dir="$4"
     local model_tag="$5"
     RUN_KIND="$run_kind" RUN_ID_VALUE="$run_id" RUN_DIR_VALUE="$run_dir" DATA_DIR_VALUE="$data_dir" MODEL_TAG_VALUE="$model_tag" \
-    python - <<'PY'
+    "$PYTHON_BIN" - <<'PY'
 import csv
 import json
 import os
@@ -234,9 +247,11 @@ summary = {
         "base_eval_core_csv": str(run_dir / "base_eval_core.csv"),
         "report": str(run_dir / "report.md"),
         "semdedup_manifest": str(run_dir / "semdedup_manifest.json"),
+        "random_drop_manifest": str(run_dir / "random_drop_manifest.json"),
     },
     "data_stats": load_json(run_dir / "data_stats.json"),
     "semdedup_manifest": load_json(run_dir / "semdedup_manifest.json"),
+    "random_drop_manifest": load_json(run_dir / "random_drop_manifest.json"),
     "metrics": {
         "num_iterations": num_iterations,
         "total_training_tokens": total_training_tokens,
@@ -262,9 +277,11 @@ run_one() {
     local run_kind="$1"
     local default_run_id
     if [[ "$run_kind" == "baseline" ]]; then
-        default_run_id="baseline_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}"
+        default_run_id="baseline_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}_seed${SEED}"
+    elif [[ "$run_kind" == "semdedup" ]]; then
+        default_run_id="semdedup_eps${SEMD_EPS_SLUG}_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}_seed${SEED}"
     else
-        default_run_id="semdedup_eps${SEMD_EPS_SLUG}_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}"
+        default_run_id="randomdrop_drop${RANDOM_DROP_REMOVED_DOCS}_rdseed${RANDOM_DROP_SEED}_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}_seed${SEED}"
     fi
     local run_id
     if [[ -n "${RUN_ID:-}" ]]; then
@@ -283,13 +300,17 @@ run_one() {
     local data_dir="$INPUT_DATA_DIR"
     if [[ "$run_kind" == "semdedup" ]]; then
         data_dir="${SEMD_OUTPUT_DIR:-$run_dir/base_data_climbmix_semdedup_eps${SEMD_EPS_SLUG}_n${NUM_TRAIN_SHARDS}}"
+    elif [[ "$run_kind" == "randomdrop" ]]; then
+        data_dir="${RANDOM_DROP_OUTPUT_DIR:-$run_dir/base_data_climbmix_randomdrop_drop${RANDOM_DROP_REMOVED_DOCS}_seed${RANDOM_DROP_SEED}_n${NUM_TRAIN_SHARDS}}"
     fi
 
     local model_tag
     if [[ "$run_kind" == "baseline" ]]; then
-        model_tag="${RUN_TAG_BASELINE:-d${DEPTH}-climbmix-nosd-n${NUM_TRAIN_SHARDS}-${RUN_TIMESTAMP}}"
+        model_tag="${RUN_TAG_BASELINE:-d${DEPTH}-climbmix-nosd-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
+    elif [[ "$run_kind" == "semdedup" ]]; then
+        model_tag="${RUN_TAG_SEMDEDUP:-d${DEPTH}-climbmix-semdedup-eps${SEMD_EPS_SLUG}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
     else
-        model_tag="${RUN_TAG_SEMDEDUP:-d${DEPTH}-climbmix-semdedup-eps${SEMD_EPS_SLUG}-n${NUM_TRAIN_SHARDS}-${RUN_TIMESTAMP}}"
+        model_tag="${RUN_TAG_RANDOMDROP:-d${DEPTH}-climbmix-randomdrop-drop${RANDOM_DROP_REMOVED_DOCS}-rdseed${RANDOM_DROP_SEED}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
     fi
 
     write_run_config "$run_kind" "$run_id" "$run_dir" "$data_dir" "$model_tag"
@@ -342,13 +363,50 @@ run_one() {
             if [[ "$SKIP_TOKEN_STATS" == "1" ]]; then
                 SEMD_ARGS+=(--skip-token-stats)
             fi
-            python -m scripts.build_semdedup_climbmix "${SEMD_ARGS[@]}" 2>&1 | tee "$run_dir/semdedup.log"
+            "$PYTHON_BIN" -m scripts.build_semdedup_climbmix "${SEMD_ARGS[@]}" 2>&1 | tee "$run_dir/semdedup.log"
         else
             if [[ ! -d "$data_dir" ]]; then
                 echo "DO_SEMDEDUP=0 but SemDeDup data dir does not exist: $data_dir" >&2
                 exit 1
             fi
+            if [[ -f "$data_dir/semdedup_manifest.json" ]]; then
+                cp "$data_dir/semdedup_manifest.json" "$run_dir/semdedup_manifest.json"
+            fi
             echo "Skipped SemDeDup build; using existing data dir: $data_dir" | tee "$run_dir/semdedup.skipped"
+        fi
+    fi
+
+    if [[ "$run_kind" == "randomdrop" ]]; then
+        if [[ "$DO_RANDOM_DROP" == "1" ]]; then
+            RANDOM_DROP_ARGS=(
+                --input-data-dir "$INPUT_DATA_DIR"
+                --output-data-dir "$data_dir"
+                --analysis-output-dir "$run_dir"
+                --num-train-shards "$NUM_TRAIN_SHARDS"
+                --max-docs "$MAX_DOCS"
+                --target-removed-docs "$RANDOM_DROP_REMOVED_DOCS"
+                --random-seed "$RANDOM_DROP_SEED"
+                --audit-sample-size "$AUDIT_SAMPLE_SIZE"
+                --audit-seed "$AUDIT_SEED"
+                --tokenizer-batch-size "$TOKENIZER_BATCH_SIZE"
+                --tokenizer-threads "$TOKENIZER_THREADS"
+            )
+            if [[ "$RANDOM_DROP_OVERWRITE" == "1" || "$SEMD_OVERWRITE" == "1" ]]; then
+                RANDOM_DROP_ARGS+=(--overwrite)
+            fi
+            if [[ "$SKIP_TOKEN_STATS" == "1" ]]; then
+                RANDOM_DROP_ARGS+=(--skip-token-stats)
+            fi
+            "$PYTHON_BIN" -m scripts.build_random_drop_climbmix "${RANDOM_DROP_ARGS[@]}" 2>&1 | tee "$run_dir/randomdrop.log"
+        else
+            if [[ ! -d "$data_dir" ]]; then
+                echo "DO_RANDOM_DROP=0 but random-drop data dir does not exist: $data_dir" >&2
+                exit 1
+            fi
+            if [[ -f "$data_dir/random_drop_manifest.json" ]]; then
+                cp "$data_dir/random_drop_manifest.json" "$run_dir/random_drop_manifest.json"
+            fi
+            echo "Skipped random-drop build; using existing data dir: $data_dir" | tee "$run_dir/randomdrop.skipped"
         fi
     fi
 
@@ -367,15 +425,17 @@ run_one() {
     if [[ "$STATS_MAX_DOCS" -ge 0 ]]; then
         STATS_ARGS+=(--max-docs "$STATS_MAX_DOCS")
     fi
-    python -m scripts.climbmix_data_stats "${STATS_ARGS[@]}"
+    "$PYTHON_BIN" -m scripts.climbmix_data_stats "${STATS_ARGS[@]}"
 
-    python -m nanochat.report reset
+    "$PYTHON_BIN" -m nanochat.report reset
 
     local wandb_run="${WANDB_RUN:-dummy}"
     if [[ "$run_kind" == "baseline" && -n "${WANDB_RUN_BASELINE:-}" ]]; then
         wandb_run="$WANDB_RUN_BASELINE"
     elif [[ "$run_kind" == "semdedup" && -n "${WANDB_RUN_SEMDEDUP:-}" ]]; then
         wandb_run="$WANDB_RUN_SEMDEDUP"
+    elif [[ "$run_kind" == "randomdrop" && -n "${WANDB_RUN_RANDOMDROP:-}" ]]; then
+        wandb_run="$WANDB_RUN_RANDOMDROP"
     fi
 
     TRAIN_HORIZON_ARGS=(--target-param-data-ratio="$PARAM_DATA_RATIO")
@@ -397,6 +457,8 @@ run_one() {
             --sample-every="$SAMPLE_EVERY" \
             --save-every="$SAVE_EVERY" \
             --run="$wandb_run" \
+            --seed="$SEED" \
+            --core-eval-seed="$CORE_EVAL_SEED" \
             --model-tag="$model_tag" \
             --data-source=parquet \
             --data-dir="$data_dir" 2>&1 | tee "$run_dir/train.log"
@@ -409,6 +471,8 @@ run_one() {
             --eval="$BASE_EVAL_MODES" \
             --max-per-task="$FINAL_CORE_MAX_PER_TASK" \
             --device-batch-size="$DEVICE_BATCH_SIZE" \
+            --seed="$SEED" \
+            --core-eval-seed="$CORE_EVAL_SEED" \
             --model-tag="$model_tag" \
             --data-source=parquet \
             --data-dir="$data_dir" 2>&1 | tee "$run_dir/base_eval.log"
@@ -420,7 +484,7 @@ run_one() {
         echo "Skipped base eval because DO_EVAL=0" | tee "$run_dir/base_eval.log"
     fi
 
-    python -m nanochat.report generate 2>&1 | tee "$run_dir/report_generate.log"
+    "$PYTHON_BIN" -m nanochat.report generate 2>&1 | tee "$run_dir/report_generate.log"
     if [[ -f report.md ]]; then
         cp report.md "$run_dir/report.md"
     elif [[ -f "$NANOCHAT_BASE_DIR/report/report.md" ]]; then
@@ -436,4 +500,7 @@ if [[ "$MODE" == "baseline" || "$MODE" == "both" ]]; then
 fi
 if [[ "$MODE" == "semdedup" || "$MODE" == "both" ]]; then
     run_one semdedup
+fi
+if [[ "$MODE" == "randomdrop" ]]; then
+    run_one randomdrop
 fi
