@@ -22,7 +22,10 @@ fi
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export NCCL_NVLS_ENABLE="${NCCL_NVLS_ENABLE:-0}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
-export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat_b200_climbmix}"
+DATASET_TAG="${DATASET_TAG:-climbmix}"
+export DATASET_TAG
+export NANOCHAT_DATASET_NAME="${NANOCHAT_DATASET_NAME:-$DATASET_TAG}"
+export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat_b200_${DATASET_TAG}}"
 mkdir -p "$NANOCHAT_BASE_DIR"
 
 NUM_GPUS="${NUM_GPUS:-8}"
@@ -42,8 +45,9 @@ if [[ -z "${DATASET_SHARDS:-}" ]]; then
     fi
 fi
 
-INPUT_DATA_DIR="${INPUT_DATA_DIR:-$NANOCHAT_BASE_DIR/base_data_climbmix}"
-RUN_ROOT="${RUN_ROOT:-$NANOCHAT_BASE_DIR/experiments/climbmix_semdedup_quality}"
+INPUT_DATA_DIR="${INPUT_DATA_DIR:-$NANOCHAT_BASE_DIR/base_data_${DATASET_TAG}}"
+export NANOCHAT_DATA_DIR="${NANOCHAT_DATA_DIR:-$INPUT_DATA_DIR}"
+RUN_ROOT="${RUN_ROOT:-$NANOCHAT_BASE_DIR/experiments/${DATASET_TAG}_semdedup_quality}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 DO_TRAIN="${DO_TRAIN:-1}"
@@ -93,6 +97,7 @@ TOKENIZER_THREADS="${TOKENIZER_THREADS:-4}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export NUM_GPUS DEVICE_BATCH_SIZE DEPTH PARAM_DATA_RATIO NUM_ITERATIONS NUM_TRAIN_SHARDS DATASET_SHARDS MAX_DOCS
+export NANOCHAT_DATA_DIR NANOCHAT_DATASET_NAME NANOCHAT_DATASET_URL NANOCHAT_DATASET_BASE_URL NANOCHAT_DATASET_MAX_SHARD
 export SEMD_BACKEND SEMD_MODEL SEMD_EPS SEMD_N_CLUSTERS SEMD_DISTANCE_METRIC SEMD_WHICH_TO_KEEP
 export SEMD_PAIRWISE_BATCH_SIZE SEMD_EMBEDDING_MAX_CHARS SEMD_VLLM_INIT_KWARGS_JSON
 export SEMD_VLLM_ATTENTION_BACKEND SEMD_VLLM_ENFORCE_EAGER SEMD_RAY_TEMP_DIR SEMD_NO_RAY_PREINIT
@@ -133,7 +138,9 @@ from pathlib import Path
 
 keys = [
     "RUN_KIND", "RUN_ID_VALUE", "RUN_DIR_VALUE", "DATA_DIR_VALUE", "MODEL_TAG_VALUE",
-    "NANOCHAT_BASE_DIR", "WANDB_MODE", "NUM_GPUS", "DEVICE_BATCH_SIZE", "DEPTH", "PARAM_DATA_RATIO",
+    "DATASET_TAG", "NANOCHAT_BASE_DIR", "NANOCHAT_DATA_DIR", "NANOCHAT_DATASET_NAME",
+    "NANOCHAT_DATASET_URL", "NANOCHAT_DATASET_BASE_URL", "NANOCHAT_DATASET_MAX_SHARD",
+    "WANDB_MODE", "NUM_GPUS", "DEVICE_BATCH_SIZE", "DEPTH", "PARAM_DATA_RATIO",
     "NUM_ITERATIONS", "NUM_TRAIN_SHARDS", "DATASET_SHARDS", "MAX_DOCS",
     "SEMD_BACKEND", "SEMD_MODEL", "SEMD_EPS", "SEMD_N_CLUSTERS",
     "SEMD_DISTANCE_METRIC", "SEMD_WHICH_TO_KEEP", "SEMD_PAIRWISE_BATCH_SIZE",
@@ -299,18 +306,18 @@ run_one() {
 
     local data_dir="$INPUT_DATA_DIR"
     if [[ "$run_kind" == "semdedup" ]]; then
-        data_dir="${SEMD_OUTPUT_DIR:-$run_dir/base_data_climbmix_semdedup_eps${SEMD_EPS_SLUG}_n${NUM_TRAIN_SHARDS}}"
+        data_dir="${SEMD_OUTPUT_DIR:-$run_dir/base_data_${DATASET_TAG}_semdedup_eps${SEMD_EPS_SLUG}_n${NUM_TRAIN_SHARDS}}"
     elif [[ "$run_kind" == "randomdrop" ]]; then
-        data_dir="${RANDOM_DROP_OUTPUT_DIR:-$run_dir/base_data_climbmix_randomdrop_drop${RANDOM_DROP_REMOVED_DOCS}_seed${RANDOM_DROP_SEED}_n${NUM_TRAIN_SHARDS}}"
+        data_dir="${RANDOM_DROP_OUTPUT_DIR:-$run_dir/base_data_${DATASET_TAG}_randomdrop_drop${RANDOM_DROP_REMOVED_DOCS}_seed${RANDOM_DROP_SEED}_n${NUM_TRAIN_SHARDS}}"
     fi
 
     local model_tag
     if [[ "$run_kind" == "baseline" ]]; then
-        model_tag="${RUN_TAG_BASELINE:-d${DEPTH}-climbmix-nosd-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
+        model_tag="${RUN_TAG_BASELINE:-d${DEPTH}-${DATASET_TAG}-nosd-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
     elif [[ "$run_kind" == "semdedup" ]]; then
-        model_tag="${RUN_TAG_SEMDEDUP:-d${DEPTH}-climbmix-semdedup-eps${SEMD_EPS_SLUG}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
+        model_tag="${RUN_TAG_SEMDEDUP:-d${DEPTH}-${DATASET_TAG}-semdedup-eps${SEMD_EPS_SLUG}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
     else
-        model_tag="${RUN_TAG_RANDOMDROP:-d${DEPTH}-climbmix-randomdrop-drop${RANDOM_DROP_REMOVED_DOCS}-rdseed${RANDOM_DROP_SEED}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
+        model_tag="${RUN_TAG_RANDOMDROP:-d${DEPTH}-${DATASET_TAG}-randomdrop-drop${RANDOM_DROP_REMOVED_DOCS}-rdseed${RANDOM_DROP_SEED}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
     fi
 
     write_run_config "$run_kind" "$run_id" "$run_dir" "$data_dir" "$model_tag"

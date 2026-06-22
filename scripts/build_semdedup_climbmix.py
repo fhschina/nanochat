@@ -10,6 +10,7 @@ experiment.
 """
 
 import argparse
+from collections import Counter, defaultdict
 import hashlib
 import json
 import os
@@ -128,6 +129,11 @@ def _collect_doc_ids(paths: list[Path]) -> set[str] | None:
             table = pf.read_row_group(rg_idx, columns=["doc_id"])
             ids.update(str(doc_id) for doc_id in table.column("doc_id").to_pylist())
     return ids
+
+
+def _parse_doc_id(doc_id: str) -> tuple[str, int]:
+    source_file, row_offset = str(doc_id).rsplit(":", 1)
+    return source_file, int(row_offset)
 
 
 def _write_id_file(path: Path, ids: set[str]) -> None:
@@ -326,7 +332,7 @@ def _preinit_local_ray(args) -> None:
     ray.init(
         address="local",
         _temp_dir=str(ray_temp_dir),
-        include_dashboard=False,
+        include_dashboard=True,
         ignore_reinit_error=True,
         runtime_env={
             "env_vars": {
@@ -454,6 +460,7 @@ def _normalize_to_nanochat(
     val_path: Path,
     output_data_dir: Path,
     overwrite: bool,
+    source_files: list[str] | None = None,
     tokenizer=None,
     tokenizer_batch_size: int = 128,
     tokenizer_threads: int = 4,
@@ -463,23 +470,66 @@ def _normalize_to_nanochat(
     if not dedup_paths:
         raise FileNotFoundError(f"No parquet files found in {dedup_dir}")
 
+    if any("doc_id" not in _column_names(path) for path in dedup_paths):
+        raise ValueError("Deduplicated parquet output must contain doc_id to preserve source shard order")
+
+    source_to_paths: dict[str, set[Path]] = defaultdict(set)
+    source_doc_counts: Counter[str] = Counter()
+    mixed_source_files = []
+    for path in dedup_paths:
+        path_sources: set[str] = set()
+        pf = pq.ParquetFile(path)
+        for rg_idx in range(pf.num_row_groups):
+            table = pf.read_row_group(rg_idx, columns=["doc_id"])
+            for doc_id in table.column("doc_id").to_pylist():
+                source_file, _ = _parse_doc_id(str(doc_id))
+                path_sources.add(source_file)
+                source_doc_counts[source_file] += 1
+        for source_file in path_sources:
+            source_to_paths[source_file].add(path)
+        if len(path_sources) > 1:
+            mixed_source_files.append({"file": path.name, "source_count": len(path_sources)})
+
+    if source_files is None:
+        source_files = sorted(source_to_paths)
+    else:
+        unknown_sources = sorted(set(source_to_paths) - set(source_files))
+        if unknown_sources:
+            raise ValueError(f"Deduplicated output contained unknown source files: {unknown_sources[:10]}")
+
     train_out_paths = []
-    for idx, src_path in enumerate(dedup_paths):
+    per_source_outputs = []
+    for idx, source_file in enumerate(source_files):
         dst_path = output_data_dir / f"shard_{idx:05d}.parquet"
-        pf = pq.ParquetFile(src_path)
-        writer = None
-        try:
+        rows: list[tuple[int, str | None]] = []
+        for src_path in sorted(source_to_paths.get(source_file, [])):
+            pf = pq.ParquetFile(src_path)
             for rg_idx in range(pf.num_row_groups):
-                table = pf.read_row_group(rg_idx, columns=["text"])
-                out = pa.table({"text": table.column("text")})
-                if writer is None:
-                    writer = pq.ParquetWriter(dst_path, out.schema, compression="zstd")
-                writer.write_table(out, row_group_size=ROW_GROUP_SIZE)
-        finally:
-            if writer is not None:
-                writer.close()
-        if dst_path.exists():
-            train_out_paths.append(dst_path)
+                table = pf.read_row_group(rg_idx, columns=["doc_id", "text"])
+                ids = table.column("doc_id").to_pylist()
+                texts = table.column("text").to_pylist()
+                for doc_id, text in zip(ids, texts):
+                    row_source, row_offset = _parse_doc_id(str(doc_id))
+                    if row_source == source_file:
+                        rows.append((row_offset, text))
+        rows.sort(key=lambda item: item[0])
+        row_offsets = [row_offset for row_offset, _ in rows]
+        duplicate_offsets = len(row_offsets) - len(set(row_offsets))
+        if duplicate_offsets:
+            raise ValueError(f"Duplicate row offsets found for {source_file}: {duplicate_offsets}")
+
+        table = pa.table({"text": [text for _, text in rows]})
+        pq.write_table(table, dst_path, compression="zstd", row_group_size=ROW_GROUP_SIZE)
+        train_out_paths.append(dst_path)
+        per_source_outputs.append(
+            {
+                "source_file": source_file,
+                "output_file": dst_path.name,
+                "kept_docs": len(rows),
+                "first_kept_row": row_offsets[0] if row_offsets else None,
+                "last_kept_row": row_offsets[-1] if row_offsets else None,
+            }
+        )
 
     if not train_out_paths:
         raise ValueError("Normalized train output contains zero parquet files")
@@ -488,7 +538,20 @@ def _normalize_to_nanochat(
     shutil.copy2(val_path, val_output_path)
     train_stats = _count_texts(train_out_paths, tokenizer, tokenizer_batch_size, tokenizer_threads)
     val_stats = _count_texts([val_output_path], tokenizer, tokenizer_batch_size, tokenizer_threads)
-    return {"train": train_stats, "val": val_stats, "val_output_file": val_output_path.name}
+    return {
+        "train": train_stats,
+        "val": val_stats,
+        "val_output_file": val_output_path.name,
+        "order": {
+            "preserved_by": "doc_id_source_file_row_offset",
+            "source_file_count": len(source_files),
+            "dedup_parquet_file_count": len(dedup_paths),
+            "mixed_source_file_count": len(mixed_source_files),
+            "mixed_source_files_sample": mixed_source_files[:10],
+            "missing_source_files": [source_file for source_file in source_files if source_doc_counts[source_file] == 0],
+            "per_source_outputs": per_source_outputs,
+        },
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -573,6 +636,7 @@ def main() -> None:
     print(f"Cache dir: {args.cache_dir}")
 
     input_stats = _stage_train_inputs(train_paths, staged_input_dir, args.max_docs, overwrite=args.overwrite)
+    source_files = [entry["source_file"] for entry in input_stats.get("files", [])]
     staged_paths = _parquet_files(staged_input_dir)
     if tokenizer is not None:
         input_stats = _count_texts(staged_paths, tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
@@ -604,6 +668,7 @@ def main() -> None:
         val_path,
         args.output_data_dir,
         overwrite=args.overwrite,
+        source_files=source_files,
         tokenizer=tokenizer,
         tokenizer_batch_size=args.tokenizer_batch_size,
         tokenizer_threads=args.tokenizer_threads,

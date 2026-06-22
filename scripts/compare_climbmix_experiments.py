@@ -1,5 +1,5 @@
 """
-Compare a no-SemDeDup ClimbMix run with a SemDeDup ClimbMix run.
+Compare a no-SemDeDup run with a SemDeDup run.
 
 The script is intentionally tolerant of partial smoke runs: missing logs or
 metrics are rendered as "-" rather than failing, while missing run directories
@@ -158,7 +158,7 @@ def _render_core_delta(baseline_csv: dict[str, dict[str, float]], semd_csv: dict
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare ClimbMix no-SemDeDup and SemDeDup run directories")
+    parser = argparse.ArgumentParser(description="Compare no-SemDeDup and SemDeDup run directories")
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--semdedup", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -176,6 +176,10 @@ def main() -> None:
 
     baseline = _load_json(baseline_dir / "run_summary.json")
     semdedup = _load_json(semdedup_dir / "run_summary.json")
+    baseline_config = _load_json(baseline_dir / "run_config.json")
+    semdedup_config = _load_json(semdedup_dir / "run_config.json")
+    dataset_tag = baseline_config.get("DATASET_TAG") or semdedup_config.get("DATASET_TAG") or "Dataset"
+    dataset_label = str(dataset_tag).replace("_", "-")
     baseline["data_stats"] = _load_json(baseline_dir / "data_stats.json")
     semdedup["data_stats"] = _load_json(semdedup_dir / "data_stats.json")
     semd_manifest = _load_json(semdedup_dir / "semdedup_manifest.json")
@@ -184,7 +188,7 @@ def main() -> None:
     semd_csv = _load_core_csv(semdedup_dir / "base_eval_core.csv")
 
     content = [
-        "# ClimbMix SemDeDup Experiment Comparison",
+        f"# {dataset_label} SemDeDup Experiment Comparison",
         "",
         "## Summary Table",
         "",

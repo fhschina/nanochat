@@ -19,12 +19,21 @@ from nanochat.common import get_base_dir
 # -----------------------------------------------------------------------------
 # The specifics of the current pretraining dataset
 
-# The URL on the internet where the data is hosted and downloaded from on demand
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
+# The URL on the internet where the data is hosted and downloaded from on demand.
+# Override these to reuse the same downloader with another NanoChat-style
+# parquet repo, e.g. karpathy/fineweb-edu-100b-shuffle.
+DATASET_NAME = os.environ.get("NANOCHAT_DATASET_NAME", "climbmix")
+BASE_URL = os.environ.get(
+    "NANOCHAT_DATASET_URL",
+    os.environ.get(
+        "NANOCHAT_DATASET_BASE_URL",
+        "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main",
+    ),
+)
+MAX_SHARD = int(os.environ.get("NANOCHAT_DATASET_MAX_SHARD", "6542")) # the last datashard is shard_XXXXX.parquet
 index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
 base_dir = get_base_dir()
-DATA_DIR = os.environ.get("NANOCHAT_DATA_DIR", os.path.join(base_dir, "base_data_climbmix"))
+DATA_DIR = os.environ.get("NANOCHAT_DATA_DIR", os.path.join(base_dir, f"base_data_{DATASET_NAME}"))
 
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
@@ -149,6 +158,9 @@ if __name__ == "__main__":
     ids_to_download.append(MAX_SHARD) # always download the validation shard
 
     # Download the shards
+    print(f"Dataset: {DATASET_NAME}")
+    print(f"Source URL: {BASE_URL}")
+    print(f"Validation shard: {index_to_filename(MAX_SHARD)}")
     print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
     print(f"Target directory: {DATA_DIR}")
     print()
