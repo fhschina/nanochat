@@ -340,7 +340,9 @@ def _preinit_local_ray(args) -> None:
             }
         },
     )
-    print(f"Initialized isolated local Ray at {ray.get_runtime_context().gcs_address} (temp_dir={ray_temp_dir})")
+    ray_address = ray.get_runtime_context().gcs_address
+    os.environ["RAY_ADDRESS"] = ray_address
+    print(f"Initialized isolated local Ray at {ray_address} (temp_dir={ray_temp_dir}, RAY_ADDRESS={ray_address})")
 
 
 def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict:
