@@ -328,10 +328,16 @@ def _preinit_local_ray(args, stage_name: str = "") -> None:
     if ray.is_initialized():
         ray.shutdown()
     os.environ.pop("RAY_ADDRESS", None)
+    stage_slug = ""
     ray_temp_dir = args.ray_temp_dir.expanduser().resolve()
     if stage_name:
-        safe_stage = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stage_name)
-        ray_temp_dir = ray_temp_dir / safe_stage
+        stage_slug = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stage_name)
+        ray_temp_dir = ray_temp_dir / stage_slug
+    requested_ray_temp_dir = ray_temp_dir
+    if len(str(ray_temp_dir)) > 40:
+        digest = hashlib.sha1(str(ray_temp_dir).encode("utf-8")).hexdigest()[:8]
+        short_stage = (stage_slug or "ray")[:3]
+        ray_temp_dir = Path("/tmp") / f"fw{os.getpid()}_{short_stage}_{digest}"
     ray_temp_dir.mkdir(parents=True, exist_ok=True)
     ray.init(
         address="local",
@@ -347,7 +353,44 @@ def _preinit_local_ray(args, stage_name: str = "") -> None:
     ray_address = ray.get_runtime_context().gcs_address
     os.environ["RAY_ADDRESS"] = ray_address
     label = f" for {stage_name}" if stage_name else ""
-    print(f"Initialized isolated local Ray{label} at {ray_address} (temp_dir={ray_temp_dir}, RAY_ADDRESS={ray_address})")
+    requested = f", requested_temp_dir={requested_ray_temp_dir}" if requested_ray_temp_dir != ray_temp_dir else ""
+    print(
+        f"Initialized isolated local Ray{label} at {ray_address} "
+        f"(temp_dir={ray_temp_dir}, RAY_ADDRESS={ray_address}{requested})"
+    )
+
+
+def _source_files_from_staged_paths(staged_paths: list[Path]) -> list[str]:
+    source_files = []
+    for path in staged_paths:
+        if "doc_id" not in _column_names(path):
+            raise ValueError(f"Staged input is missing doc_id column: {path}")
+        pf = pq.ParquetFile(path)
+        source_file = None
+        for rg_idx in range(pf.num_row_groups):
+            table = pf.read_row_group(rg_idx, columns=["doc_id"])
+            ids = table.column("doc_id").to_pylist()
+            if ids:
+                source_file, _ = _parse_doc_id(str(ids[0]))
+                break
+        if source_file is None:
+            raise ValueError(f"Could not infer source file from staged input: {path}")
+        source_files.append(source_file)
+    return source_files
+
+
+def _load_stats_cache(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict) or "docs" not in payload or "chars" not in payload:
+        raise ValueError(f"Invalid staged input stats cache: {path}")
+    return payload
+
+
+def _write_stats_cache(path: Path, stats: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stats, indent=2, sort_keys=True))
 
 
 def _count_semantic_duplicates(tasks) -> int:
@@ -717,6 +760,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip embedding generation and resume semantic deduplication from cache_dir/curator_cache/embeddings",
     )
+    parser.add_argument(
+        "--reuse-staged-inputs",
+        action="store_true",
+        help="Reuse cache_dir/input_with_ids instead of restaging train inputs",
+    )
+    parser.add_argument("--input-stats-cache", type=Path, default=None, help="Optional staged input stats JSON cache")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -728,6 +777,8 @@ def parse_args() -> argparse.Namespace:
         args.analysis_output_dir = args.output_data_dir
     if args.ray_temp_dir is None:
         args.ray_temp_dir = args.cache_dir / "ray"
+    if args.input_stats_cache is None:
+        args.input_stats_cache = args.cache_dir / "input_stats.json"
     return args
 
 
@@ -737,6 +788,7 @@ def main() -> None:
     args.output_data_dir = args.output_data_dir.expanduser().resolve()
     args.cache_dir = args.cache_dir.expanduser().resolve()
     args.analysis_output_dir = args.analysis_output_dir.expanduser().resolve()
+    args.input_stats_cache = args.input_stats_cache.expanduser().resolve()
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     args.analysis_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -756,13 +808,26 @@ def main() -> None:
     print(f"Output data dir: {args.output_data_dir}")
     print(f"Cache dir: {args.cache_dir}")
 
-    input_stats = _stage_train_inputs(train_paths, staged_input_dir, args.max_docs, overwrite=args.overwrite)
-    source_files = [entry["source_file"] for entry in input_stats.get("files", [])]
-    staged_paths = _parquet_files(staged_input_dir)
-    if tokenizer is not None:
-        input_stats = _count_texts(staged_paths, tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
+    if args.reuse_staged_inputs:
+        staged_paths = _parquet_files(staged_input_dir)
+        if not staged_paths:
+            raise FileNotFoundError(f"Cannot reuse staged inputs; no parquet files found in {staged_input_dir}")
+        source_files = _source_files_from_staged_paths(staged_paths)
+        input_stats = _load_stats_cache(args.input_stats_cache)
+        if input_stats is None:
+            input_stats = _count_texts(staged_paths, tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
+            _write_stats_cache(args.input_stats_cache, input_stats)
+        print(f"Reusing staged inputs from {staged_input_dir}")
+        print(f"Loaded staged input stats cache: {args.input_stats_cache}")
+    else:
+        input_stats = _stage_train_inputs(train_paths, staged_input_dir, args.max_docs, overwrite=args.overwrite)
+        source_files = [entry["source_file"] for entry in input_stats.get("files", [])]
+        staged_paths = _parquet_files(staged_input_dir)
+        if tokenizer is not None:
+            input_stats = _count_texts(staged_paths, tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
+        _write_stats_cache(args.input_stats_cache, input_stats)
     print(f"Staged {input_stats['docs']:,} docs / {input_stats['chars']:,} chars")
-    if tokenizer is not None:
+    if tokenizer is not None and "tokens" in input_stats:
         print(f"Staged token count: {input_stats['tokens']:,}")
 
     backend_result = None
