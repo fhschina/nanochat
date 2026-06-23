@@ -328,6 +328,7 @@ def _preinit_local_ray(args, stage_name: str = "") -> None:
     if ray.is_initialized():
         ray.shutdown()
     os.environ.pop("RAY_ADDRESS", None)
+    os.environ.pop("RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES", None)
     stage_slug = ""
     ray_temp_dir = args.ray_temp_dir.expanduser().resolve()
     if stage_name:
@@ -339,17 +340,19 @@ def _preinit_local_ray(args, stage_name: str = "") -> None:
         short_stage = (stage_slug or "ray")[:3]
         ray_temp_dir = Path("/tmp") / f"fw{os.getpid()}_{short_stage}_{digest}"
     ray_temp_dir.mkdir(parents=True, exist_ok=True)
-    ray.init(
-        address="local",
-        _temp_dir=str(ray_temp_dir),
-        include_dashboard=False,
-        ignore_reinit_error=True,
-        runtime_env={
+    init_kwargs = {
+        "address": "local",
+        "_temp_dir": str(ray_temp_dir),
+        "include_dashboard": False,
+        "ignore_reinit_error": True,
+    }
+    if stage_name != "kmeans":
+        init_kwargs["runtime_env"] = {
             "env_vars": {
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             }
-        },
-    )
+        }
+    ray.init(**init_kwargs)
     ray_address = ray.get_runtime_context().gcs_address
     os.environ["RAY_ADDRESS"] = ray_address
     label = f" for {stage_name}" if stage_name else ""
