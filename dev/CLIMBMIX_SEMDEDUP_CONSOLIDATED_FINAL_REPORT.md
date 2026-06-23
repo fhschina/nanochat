@@ -1,6 +1,6 @@
 # ClimbMix SemDeDup Consolidated Final Report
 
-Date: 2026-06-22
+Date: 2026-06-23
 
 This report supersedes the initial single-run branch report and integrates the
 follow-up task-delta investigation. It combines:
@@ -11,6 +11,7 @@ follow-up task-delta investigation. It combines:
 - random-drop controls;
 - SemDeDup eps sweep runs;
 - removed-sample audit results;
+- order-preserving SemDeDup control;
 - additional interpretation and caveats from inspecting the artifacts.
 
 The scope is semantic deduplication quality for ClimbMix + NanoChat. It does
@@ -21,7 +22,8 @@ not benchmark cuVS clustering performance.
 The short answer is:
 
 - The pipeline works end to end for ClimbMix baseline, SemDeDup, random-drop
-  controls, seed repeats, eval-only repeats, and eps sweeps.
+  controls, seed repeats, eval-only repeats, eps sweeps, and the
+  order-preserving SemDeDup control.
 - SemDeDup eps0.07 removes a small but non-trivial amount of data:
   291,374 train documents and 210.5M train tokens, about 2.0% of docs and 2.3%
   of tokens.
@@ -35,6 +37,9 @@ The short answer is:
 - The most interesting signal is task-level redistribution:
   `commonsense_qa` improves much more under SemDeDup eps0.07 than under the
   matched random-drop control.
+- The new order-preserving control shows that the `commonsense_qa` lift is not
+  mainly a shard-order artifact. Preserving original ClimbMix shard/doc order
+  still gives a large `commonsense_qa` improvement over baseline.
 - `winogrande` remains unresolved: it weakens under both SemDeDup and
   random-drop controls, so it may be a generic data-removal or seed-sensitive
   effect.
@@ -49,7 +54,9 @@ The best current claim is therefore:
 > SemDeDup eps0.07 produces a task-level redistribution signal on ClimbMix,
 > especially a `commonsense_qa` gain that random-drop does not explain. It does
 > not yet demonstrate a robust aggregate CORE win or a BPB/training-efficiency
-> win.
+> win. After the order-preserving control, the best explanation for the
+> `commonsense_qa` jump is SemDeDup data selection / effective diversity, with
+> shard order acting at most as a secondary amplifier.
 
 ## Source Reports And Artifacts
 
@@ -59,6 +66,9 @@ Repo reports:
   section is mainly the first full A/B run.
 - `dev/CLIMBMIX_SEMDEDUP_TASK_DELTA_FINAL_REPORT.md`: follow-up investigation
   report covering eval-only, random-drop, seed repeats, eps sweep, and audit.
+- `dev/CLIMBMIX_COMMONSENSE_QA_DELTA_ANALYSIS.md`: focused analysis of the
+  `commonsense_qa` jump, including removed/kept audit, shard-order analysis,
+  and the order-preserving control.
 - `dev/CLIMBMIX_SEMDEDUP_CONSOLIDATED_FINAL_REPORT.md`: this consolidated
   final report.
 
@@ -66,12 +76,14 @@ Generated artifact:
 
 ```bash
 /home/nfs/hfang/.cache/nanochat_b200_climbmix/experiments/climbmix_semdedup_task_delta/CLIMBMIX_SEMDEDUP_TASK_DELTA_INVESTIGATION.md
+/home/nfs/hfang/.cache/nanochat_b200_climbmix/experiments/climbmix_semdedup_task_delta/order_preserving/order_preserving_comparison.md
 ```
 
 Important caveat: the generated aggregate scanner can discover smoke/plumbing
-runs if pointed at broad experiment roots. This consolidated report uses only
-the 15 runs that have real `final_core` and `base_eval_val_bpb` values. Smoke
-runs are excluded from conclusions.
+runs if pointed at broad experiment roots. The main aggregate tables use the 15
+runs that have real `final_core` and `base_eval_val_bpb` values from the
+task-delta investigation, while the order-preserving control is reported
+separately. Smoke runs are excluded from conclusions.
 
 ## Experiment Setup
 
@@ -101,6 +113,7 @@ What was completed:
 | Random-drop sensitivity | yes | Additional random-drop seed 9002, train seed 42 |
 | SemDeDup eps sweep | yes | eps 0.05, 0.07, 0.09, 0.12 |
 | Removed-sample audit | yes | 1000 removed docs vs 1000 kept docs |
+| Order-preserving SemDeDup control | yes | Rebuilt SemDeDup output in original source-shard/doc order and reran seed-42 |
 
 ## Run Inventory
 
@@ -117,6 +130,7 @@ are excluded.
 | semdedup eps0.07 | full_seed_repeats | 44 | 0.2807 | 0.708770 | `full-semdedup-eps0p07-seed44-n170-i6612` |
 | semdedup eps0.07 | eps_sweep repeat | 43 | 0.2777 | 0.708886 | `full-semdedup-eps0p07-seed43-n170-i6612` |
 | semdedup eps0.07 | eps_sweep repeat | 44 | 0.2710 | 0.708959 | `full-semdedup-eps0p07-seed44-n170-i6612` |
+| semdedup eps0.07 order-preserving | order control | 42 | 0.2718 | 0.709047 | `full-semdedup-eps0p07-orderpreserve-seed42-n170-i6612-cappedstats-20260623T001123Z` |
 | randomdrop seed9001 | randomdrop_control | 42 | 0.2713 | 0.708628 | `full-randomdrop-primary-rdseed9001-seed42-n170-i6612` |
 | randomdrop seed9001 | randomdrop_control | 43 | 0.2799 | 0.708531 | `full-randomdrop-primary-rdseed9001-seed43-n170-i6612` |
 | randomdrop seed9001 | randomdrop_control | 44 | 0.2687 | 0.708423 | `full-randomdrop-primary-rdseed9001-seed44-n170-i6612` |
@@ -159,7 +173,9 @@ Interpretation of the first A/B run:
 
 ## Multi-Run Aggregate
 
-This table includes only valid full/eval runs with final CORE and BPB.
+This table includes only valid full/eval runs from the main aggregate with
+final CORE and BPB. The order-preserving control is reported in its own section
+because it is a targeted confound-control run.
 
 | Arm | Runs | Seeds | CORE mean | CORE std | Val BPB mean | Keep tokens | Removed docs |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
@@ -212,17 +228,20 @@ deterministic.
 The main Sarah question was why there is a large gap in `commonsense_qa` and a
 large movement in `winograd` / `winogrande`.
 
-Current answer:
+Current answer after the order-preserving control:
 
 - `commonsense_qa`: the gain is the strongest task-level signal. SemDeDup
-  eps0.07 is much higher than baseline and random-drop, so this is not fully
-  explained by removing the same number of documents.
+  eps0.07 is much higher than baseline and random-drop, and the order-preserving
+  rerun still keeps most of the gain. This points to SemDeDup data selection /
+  effective diversity rather than evaluation noise, generic data removal, or
+  shard-order artifacts.
 - `winogrande`: the drop is real in SemDeDup eps0.07, but random-drop also
-  weakens it. This points to a generic data-removal or seed-sensitive effect,
-  not a clean SemDeDup-specific regression.
+  weakens it. The order-preserving rerun moves it partway back toward baseline,
+  so this looks like a mixture of generic data-removal, seed/order sensitivity,
+  and possibly removal of some useful narrative/coreference variants.
 - `winograd`: the initial single-run drop did not reproduce in the multi-run
-  mean. SemDeDup eps0.07 is higher than baseline in the aggregate focus-task
-  table, so the first `winograd` drop should not be treated as stable.
+  mean. The order-preserving rerun also moves it partway back toward baseline,
+  so the first `winograd` drop should not be treated as stable.
 
 ### Largest SemDeDup eps0.07 Task Movements vs Baseline
 
@@ -243,6 +262,49 @@ Mean task deltas across available valid runs:
 The positive side is dominated by `commonsense_qa`; the negative side is more
 spread across `winogrande`, algorithmic reasoning, operator reasoning, and
 SQuAD.
+
+## Order-Preserving SemDeDup Control
+
+The original SemDeDup normalization wrote Curator `deduplicated/*.parquet` files
+in sorted Curator hash filename order. Each output shard still came from one
+original ClimbMix shard, but the source-shard order was permuted. Since
+NanoChat reads parquet files and row groups sequentially, and the 6,612-step
+runs do not consume every train shard, this was a real possible confound.
+
+I rebuilt the SemDeDup output from the existing Curator duplicate artifacts
+without rerunning embeddings or clustering:
+
+- kept docs were written back into their original `shard_XXXXX.parquet`;
+- original within-shard document order was preserved;
+- the validation shard remained unchanged;
+- verification checked source-shard prefix matches for shards `00000`, `00001`,
+  `00002`, `00003`, `00004`, `00126`, and `00169`, all matching `10/10`.
+
+Seed-42 order-control result:
+
+| Arm | Val BPB | CORE | commonsense_qa | winograd | winogrande |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline | 0.708492 | 0.268661 | 0.013104 | 0.362637 | 0.155485 |
+| semdedup hash-order | 0.709092 | 0.277506 | 0.140049 | 0.318681 | 0.116022 |
+| semdedup order-preserving | 0.709047 | 0.271791 | 0.117527 | 0.333333 | 0.131807 |
+
+Interpretation:
+
+- `commonsense_qa` remains far above baseline after order preservation:
+  `+0.1044` centered score.
+- The old hash-order run is higher than the order-preserving run by `+0.0225`,
+  so source-shard order likely amplified the effect slightly.
+- BPB is almost identical between the two SemDeDup layouts, so the task delta is
+  not explained by a broad validation-loss improvement.
+- `winograd` and `winogrande` move partway back toward baseline after order
+  preservation, supporting the interpretation that those schema-style tasks are
+  more sensitive to seed/order/local exposure than `commonsense_qa`.
+
+This control changes the strongest causal statement: the `commonsense_qa` jump
+is not mainly a shard-order artifact. The best current explanation is SemDeDup
+data selection: eps0.07 removes high-similarity duplicate/template-heavy content
+while preserving similar roots, increasing effective diversity and leaving the
+kept distribution slightly more compact, QA-like, and lower-boilerplate.
 
 ## Removed-Sample Audit
 
@@ -344,17 +406,22 @@ removed docs have higher p50 and p95 character lengths.
 This length skew may matter for tasks such as `winogrande`, `squad`, and other
 tasks that benefit from narrative or long-context patterns.
 
-### 8. There May Be A Domain/Source Effect
+### 8. Shard Order Is Not The Main Cause
 
-The task-level redistribution could come from source skew: SemDeDup may remove
-repeated material from some sources more than others. The current audit has
-basic source counts, but the final report does not yet map sources to task-like
-domains.
+The old SemDeDup normalization did permute source-shard order, and that mattered
+enough to justify a control. But the order-preserving rerun keeps most of the
+`commonsense_qa` lift, so the primary explanation is not simply that the model
+saw different shards earlier. Order looks like a secondary amplifier.
 
-This is a promising next analysis because it could explain why
+### 9. There May Still Be A Domain/Source Effect
+
+Original ClimbMix parquet has only `text`, so true URL/domain labels are not
+available in the current artifacts. Shard-level removal rates are uniform, but
+semantic clusters may still overrepresent repeated web templates or certain
+content genres. This remains a useful next analysis because it could explain why
 `commonsense_qa` improves while `winogrande` weakens.
 
-### 9. The Current Aggregate Script Needs Filtering
+### 10. The Current Aggregate Script Needs Filtering
 
 When scanning broad experiment roots, the aggregate script can count smoke runs
 that have `run_summary.json` but no real final metrics. This can distort
@@ -410,7 +477,13 @@ For next experiments:
 - Use confidence intervals or bootstrap over CORE examples, especially for
   `commonsense_qa`, `winograd`, and `winogrande`.
 - Run a narrower eps sweep around 0.06-0.08 if eps0.07 remains interesting.
-- Add a source/domain distribution audit for kept vs removed docs.
+- Run an optional shuffled-baseline control that applies the old SemDeDup
+  source-shard permutation without removing documents, to quantify pure order
+  effects.
+- Repeat the order-preserving SemDeDup control for seeds 43 and 44 if the team
+  wants a tighter confidence interval around the `commonsense_qa` lift.
+- Add a source/domain distribution audit for kept vs removed docs when richer
+  metadata is available, or continue with shard/content-genre proxies.
 - Manually label a larger sample of removed pairs to estimate false positive
   removals.
 - Compare against an exact-dedup or near-dedup control to separate "duplicate
@@ -425,8 +498,9 @@ For next experiments:
 SemDeDup on ClimbMix is not a simple win/loss story. The robust finding is that
 it changes which capabilities improve and which degrade. eps0.07 appears to
 remove a small amount of long, more boilerplate-like duplicate content and
-creates a notable `commonsense_qa` improvement that random-drop does not
-explain. But aggregate CORE is only slightly higher, BPB is worse, and some
-tasks weaken. The right conclusion is a cautious, useful signal: SemDeDup is
-worth further targeted study, but this result is not yet strong enough to claim
-general quality or efficiency improvement.
+creates a notable `commonsense_qa` improvement that random-drop and
+order-preserving controls do not explain away. But aggregate CORE is only
+slightly higher, BPB is worse, and some tasks weaken. The right conclusion is a
+cautious, useful signal: SemDeDup is worth further targeted study, especially
+for data-selection/effective-diversity effects, but this result is not yet
+strong enough to claim general quality or efficiency improvement.
