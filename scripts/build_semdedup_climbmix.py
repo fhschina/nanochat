@@ -318,7 +318,7 @@ def _stage_train_inputs(train_paths: list[Path], staged_dir: Path, max_docs: int
     return {"docs": docs, "chars": chars, "bytes": bytes_, "files": files}
 
 
-def _preinit_local_ray(args) -> None:
+def _preinit_local_ray(args, stage_name: str = "") -> None:
     if args.no_ray_preinit:
         return
     try:
@@ -326,13 +326,17 @@ def _preinit_local_ray(args) -> None:
     except ImportError:
         return
     if ray.is_initialized():
-        return
+        ray.shutdown()
+    os.environ.pop("RAY_ADDRESS", None)
     ray_temp_dir = args.ray_temp_dir.expanduser().resolve()
+    if stage_name:
+        safe_stage = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stage_name)
+        ray_temp_dir = ray_temp_dir / safe_stage
     ray_temp_dir.mkdir(parents=True, exist_ok=True)
     ray.init(
         address="local",
         _temp_dir=str(ray_temp_dir),
-        include_dashboard=True,
+        include_dashboard=False,
         ignore_reinit_error=True,
         runtime_env={
             "env_vars": {
@@ -342,7 +346,123 @@ def _preinit_local_ray(args) -> None:
     )
     ray_address = ray.get_runtime_context().gcs_address
     os.environ["RAY_ADDRESS"] = ray_address
-    print(f"Initialized isolated local Ray at {ray_address} (temp_dir={ray_temp_dir}, RAY_ADDRESS={ray_address})")
+    label = f" for {stage_name}" if stage_name else ""
+    print(f"Initialized isolated local Ray{label} at {ray_address} (temp_dir={ray_temp_dir}, RAY_ADDRESS={ray_address})")
+
+
+def _count_semantic_duplicates(tasks) -> int:
+    total = 0
+    for task in tasks or []:
+        metadata = getattr(task, "_metadata", {}) or {}
+        total += metadata.get("num_removed", 0)
+    return total
+
+
+def _require_cached_embeddings(path: Path) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"Cannot resume SemDeDup; embeddings cache does not exist: {path}")
+    if not list(path.rglob("*.parquet")):
+        raise FileNotFoundError(f"Cannot resume SemDeDup; no embedding parquet files found in: {path}")
+
+
+def _run_curator_staged(args, workflow) -> dict:
+    from nemo_curator.backends.ray_actor_pool import RayActorPoolExecutor
+    from nemo_curator.backends.xenna import XennaExecutor
+    from nemo_curator.stages.deduplication.semantic.workflow import SemanticDeduplicationWorkflow
+
+    embedding_executor = XennaExecutor()
+    kmeans_executor = RayActorPoolExecutor()
+    pairwise_executor = XennaExecutor()
+    removal_executor = XennaExecutor()
+    workflow.embedding_executor = embedding_executor
+    workflow.kmeans_executor = kmeans_executor
+    workflow.pairwise_executor = pairwise_executor
+    workflow.removal_executor = removal_executor
+
+    stage_times = {}
+    metadata = {}
+    total_start = time.time()
+
+    if args.resume_from_embeddings:
+        _require_cached_embeddings(Path(workflow.embeddings_path))
+        print(f"Resuming Curator SemDeDup from cached embeddings: {workflow.embeddings_path}")
+    else:
+        workflow._setup_directories()
+        if workflow.verbose:
+            workflow._log_configuration()
+        embedding_start = time.time()
+        _preinit_local_ray(args, "embedding")
+        embedding_results = workflow._run_embedding_generation(embedding_executor)
+        stage_times["embedding_time"] = time.time() - embedding_start
+        metadata["embedding_tasks"] = len(embedding_results or [])
+        print(f"Embedding generation completed in {stage_times['embedding_time']:.2f} seconds")
+
+    semantic_workflow = SemanticDeduplicationWorkflow(
+        input_path=workflow.embeddings_path,
+        cache_path=workflow.semantic_dedup_path,
+        output_path=workflow.output_path,
+        n_clusters=workflow.n_clusters,
+        id_field=workflow.id_field,
+        embedding_field=workflow.embedding_field,
+        embedding_dim=workflow.embedding_dim,
+        metadata_fields=workflow.metadata_fields,
+        max_iter=workflow.kmeans_max_iter,
+        tol=workflow.kmeans_tol,
+        random_state=workflow.kmeans_random_state,
+        init=workflow.kmeans_init,
+        n_init=workflow.kmeans_n_init,
+        oversampling_factor=workflow.kmeans_oversampling_factor,
+        max_samples_per_batch=workflow.kmeans_max_samples_per_batch,
+        distance_metric=workflow.distance_metric,
+        which_to_keep=workflow.which_to_keep,
+        ranking_strategy=workflow.ranking_strategy,
+        pairwise_batch_size=workflow.pairwise_batch_size,
+        eps=workflow.eps,
+        _duplicates_num_row_groups_hint=workflow._duplicates_num_row_groups_hint,
+        read_kwargs=workflow.cache_kwargs,
+        write_kwargs=workflow.cache_kwargs,
+        clear_output=True,
+        verbose=workflow.verbose,
+    )
+    semantic_workflow._setup_directories()
+    semantic_workflow._log_configuration(pairwise_executor)
+
+    kmeans_start = time.time()
+    _preinit_local_ray(args, "kmeans")
+    kmeans_results = semantic_workflow._run_kmeans_stage(kmeans_executor)
+    stage_times["kmeans_time"] = time.time() - kmeans_start
+    metadata["kmeans_tasks"] = len(kmeans_results or [])
+    print(f"K-means clustering completed in {stage_times['kmeans_time']:.2f} seconds")
+
+    pairwise_start = time.time()
+    _preinit_local_ray(args, "pairwise")
+    pairwise_results = semantic_workflow._run_pairwise_stage(pairwise_executor)
+    stage_times["pairwise_time"] = time.time() - pairwise_start
+    metadata["pairwise_tasks"] = len(pairwise_results or [])
+    metadata["num_duplicates"] = _count_semantic_duplicates(pairwise_results)
+    print(f"Pairwise similarity completed in {stage_times['pairwise_time']:.2f} seconds")
+
+    if workflow.perform_removal:
+        removal_start = time.time()
+        _preinit_local_ray(args, "removal")
+        removal_result = workflow._run_duplicate_removal(removal_executor)
+        stage_times["removal_time"] = time.time() - removal_start
+        removal_metadata = getattr(removal_result, "metadata", None) or {}
+        metadata["num_duplicates_removed"] = removal_metadata.get("num_duplicates_removed")
+        print(f"Duplicate removal completed in {stage_times['removal_time']:.2f} seconds")
+
+    total_time = time.time() - total_start
+    metadata.update(stage_times)
+    metadata.update(
+        {
+            "total_time": total_time,
+            "embeddings_path": workflow.embeddings_path,
+            "semantic_dedup_path": workflow.semantic_dedup_path,
+            "final_output_path": workflow.deduplicated_output_path if workflow.perform_removal else None,
+            "resumed_from_embeddings": args.resume_from_embeddings,
+        }
+    )
+    return {"elapsed_sec": total_time, "metadata": metadata}
 
 
 def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict:
@@ -354,8 +474,6 @@ def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict
             "Install the text CUDA extra in a Curator-capable environment, for example: "
             "uv pip install --extra-index-url https://pypi.nvidia.com 'nemo-curator[text_cuda12]'"
         ) from exc
-
-    _preinit_local_ray(args)
 
     kwargs = {
         "input_path": str(staged_input_dir),
@@ -391,11 +509,7 @@ def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict
         kwargs["model_cache_dir"] = args.model_cache_dir
 
     workflow = TextSemanticDeduplicationWorkflow(**kwargs)
-    t0 = time.time()
-    result = workflow.run()
-    elapsed = time.time() - t0
-    metadata = getattr(result, "metadata", None)
-    return {"elapsed_sec": elapsed, "metadata": metadata}
+    return _run_curator_staged(args, workflow)
 
 
 def _load_json_object(value: str, flag_name: str) -> dict:
@@ -598,6 +712,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-token-stats", action="store_true", help="Skip tokenizer-based token stats for fast plumbing checks")
     parser.add_argument("--ray-temp-dir", type=Path, default=None, help="Ray temp dir for an isolated local Curator/Xenna run")
     parser.add_argument("--no-ray-preinit", action="store_true", help="Disable isolated local Ray pre-initialization")
+    parser.add_argument(
+        "--resume-from-embeddings",
+        action="store_true",
+        help="Skip embedding generation and resume semantic deduplication from cache_dir/curator_cache/embeddings",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
