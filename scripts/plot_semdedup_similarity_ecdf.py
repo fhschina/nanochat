@@ -34,7 +34,7 @@ def _get(obj: dict[str, Any], dotted: str, default=None):
     return cur
 
 
-def _load_scores(pairwise_dir: Path, score_column: str) -> np.ndarray:
+def _load_scores(pairwise_dir: Path, score_column: str) -> tuple[np.ndarray, dict[str, Any]]:
     paths = sorted(pairwise_dir.rglob("*.parquet"))
     if not paths:
         raise FileNotFoundError(f"No parquet files found under {pairwise_dir}")
@@ -45,12 +45,21 @@ def _load_scores(pairwise_dir: Path, score_column: str) -> np.ndarray:
         arr = table.column(score_column).combine_chunks().to_numpy(zero_copy_only=False)
         chunks.append(np.asarray(arr, dtype=np.float64))
 
-    scores = np.concatenate(chunks) if chunks else np.array([], dtype=np.float64)
-    scores = scores[np.isfinite(scores)]
-    if scores.size == 0:
+    raw_scores = np.concatenate(chunks) if chunks else np.array([], dtype=np.float64)
+    raw_scores = raw_scores[np.isfinite(raw_scores)]
+    if raw_scores.size == 0:
         raise ValueError(f"No finite {score_column!r} values found under {pairwise_dir}")
+
+    diagnostics = {
+        "raw_min": float(raw_scores.min()),
+        "raw_max": float(raw_scores.max()),
+        "raw_exact_one_documents": int(np.count_nonzero(raw_scores == 1.0)),
+        "raw_gt_one_documents": int(np.count_nonzero(raw_scores > 1.0)),
+        "raw_ge_0p999999_documents": int(np.count_nonzero(raw_scores >= 0.999999)),
+    }
+    scores = np.clip(raw_scores, 0.0, 1.0)
     scores.sort()
-    return scores
+    return scores, diagnostics
 
 
 def _fmt_int(value: int) -> str:
@@ -113,6 +122,10 @@ def _svg(
         f"Removed @ sim>={threshold:.2f}: {_fmt_int(output_stats['removed_documents'])} "
         f"({_fmt_pct(output_stats['removed_ratio'])})"
     )
+    diagnostics = (
+        f"Scores clipped to [0,1]; sim>=0.999999: "
+        f"{_fmt_int(output_stats['near_one_documents'])} ({_fmt_pct(output_stats['near_one_ratio'])})"
+    )
 
     grid = []
     tick_labels = []
@@ -150,6 +163,7 @@ def _svg(
   <rect width="100%" height="100%" fill="#fff"/>
   <text x="{width / 2:.2f}" y="40" class="title" text-anchor="middle">{html.escape(title)}</text>
   <text x="{width / 2:.2f}" y="72" class="subtitle" text-anchor="middle">{html.escape(subtitle)}</text>
+  <text x="{width / 2:.2f}" y="96" class="tick" text-anchor="middle">{html.escape(diagnostics)}</text>
   {''.join(grid)}
   <line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" class="axis"/>
   <line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" class="axis"/>
@@ -190,7 +204,7 @@ def main() -> None:
             raise ValueError("Provide --eps or --similarity-threshold")
         threshold = 1.0 - float(eps)
 
-    scores = _load_scores(args.pairwise_dir.expanduser().resolve(), args.score_column)
+    scores, diagnostics = _load_scores(args.pairwise_dir.expanduser().resolve(), args.score_column)
     below = int(np.searchsorted(scores, threshold, side="left"))
     total = int(scores.size)
     removed = total - below
@@ -205,6 +219,14 @@ def main() -> None:
         "removed_ratio": removed / total,
         "min": float(scores[0]),
         "max": float(scores[-1]),
+        "raw_min": diagnostics["raw_min"],
+        "raw_max": diagnostics["raw_max"],
+        "raw_exact_one_documents": diagnostics["raw_exact_one_documents"],
+        "raw_exact_one_ratio": diagnostics["raw_exact_one_documents"] / total,
+        "raw_gt_one_documents": diagnostics["raw_gt_one_documents"],
+        "raw_gt_one_ratio": diagnostics["raw_gt_one_documents"] / total,
+        "near_one_documents": diagnostics["raw_ge_0p999999_documents"],
+        "near_one_ratio": diagnostics["raw_ge_0p999999_documents"] / total,
         "quantiles": {f"p{int(q * 1000):03d}": float(np.quantile(scores, q)) for q in (0.5, 0.9, 0.95, 0.99, 0.999)},
         "manifest_removed_docs": _get(manifest, "removed_docs"),
         "manifest_keep_ratio_docs": _get(manifest, "keep_ratio_docs"),

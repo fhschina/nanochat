@@ -425,6 +425,12 @@ def main() -> None:
                         ["documents below threshold", ecdf_stats.get("below_documents")],
                         ["removed documents", ecdf_stats.get("removed_documents")],
                         ["removed ratio", ecdf_stats.get("removed_ratio")],
+                        ["raw max similarity", ecdf_stats.get("raw_max")],
+                        ["raw >1.0 documents", ecdf_stats.get("raw_gt_one_documents")],
+                        ["raw >1.0 ratio", ecdf_stats.get("raw_gt_one_ratio")],
+                        ["raw ==1.0 documents", ecdf_stats.get("raw_exact_one_documents")],
+                        ["sim >=0.999999 documents", ecdf_stats.get("near_one_documents")],
+                        ["sim >=0.999999 ratio", ecdf_stats.get("near_one_ratio")],
                     ],
                     ["---", "---:"],
                 ),
@@ -444,6 +450,7 @@ def main() -> None:
         "- BPB is the primary convergence-efficiency metric; lower is better.",
         "- CORE is the downstream-quality metric; interpret small average deltas together with per-task deltas and seed variance.",
         "- The ECDF x-axis is cosine similarity. For cosine distance SemDeDup, eps maps to similarity cutoff 1 - eps.",
+        "- The visible jump near cosine similarity 1.0 is a point mass of exact/near-exact duplicates. Raw Curator scores can be slightly above 1.0 from floating-point roundoff; the plotted ECDF clips scores to [0, 1] and reports the affected count.",
         "- Manual audit files remain in each SemDeDup run directory: removed_samples.jsonl and kept_samples.jsonl. Repeated SemDeDup training runs that reuse the seed42 deduped data inherit the same data audit artifacts.",
     ])
     if ignored_duplicates:

@@ -87,6 +87,12 @@ This report compares FineWeb-EDU baseline vs FineWeb-EDU SemDeDup only. Pilot/sm
 | documents below threshold | 8,427,282 |
 | removed documents | 633,070 |
 | removed ratio | 0.069873 |
+| raw max similarity | 1.000002 |
+| raw >1.0 documents | 174,879 |
+| raw >1.0 ratio | 0.019302 |
+| raw ==1.0 documents | 34,696 |
+| sim >=0.999999 documents | 362,218 |
+| sim >=0.999999 ratio | 0.039978 |
 
 ## Per-Task CORE Delta
 
@@ -126,4 +132,5 @@ All discovered repeat pairs are complete.
 - BPB is the primary convergence-efficiency metric; lower is better.
 - CORE is the downstream-quality metric; interpret small average deltas together with per-task deltas and seed variance.
 - The ECDF x-axis is cosine similarity. For cosine distance SemDeDup, eps maps to similarity cutoff 1 - eps.
+- The visible jump near cosine similarity 1.0 is a point mass of exact/near-exact duplicates. Raw Curator scores can be slightly above 1.0 from floating-point roundoff; the plotted ECDF clips scores to [0, 1] and reports the affected count.
 - Manual audit files remain in each SemDeDup run directory: removed_samples.jsonl and kept_samples.jsonl. Repeated SemDeDup training runs that reuse the seed42 deduped data inherit the same data audit artifacts.
