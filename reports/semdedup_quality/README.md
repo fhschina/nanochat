@@ -4,8 +4,10 @@ This directory keeps repo-level SemDeDup experiment documentation and final repo
 
 ## Datasets
 
-- `climbmix/`: ClimbMix runbook, branch report, task-delta analysis, commonsense QA follow-up, consolidated final report, and ECDF artifacts.
-- `fineweb_edu/`: FineWeb-EDU runbook, multi-seed repeat report, and ECDF artifacts.
+- `climbmix/`: ClimbMix canonical final report, runbook, branch report, task-delta analysis, commonsense QA follow-up, consolidated historical report, and ECDF artifacts.
+- `fineweb_edu/`: FineWeb-EDU canonical final report, runbook, multi-seed repeat report, and ECDF artifacts.
+
+Use `climbmix/final_report.md` and `fineweb_edu/final_report.md` as the main side-by-side reports. The other Markdown files are supporting detail.
 
 ## Entrypoints
 
