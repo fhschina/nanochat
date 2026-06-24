@@ -97,6 +97,10 @@ SAVE_EVERY="${SAVE_EVERY:--1}"
 TOKENIZER_BATCH_SIZE="${TOKENIZER_BATCH_SIZE:-128}"
 TOKENIZER_THREADS="${TOKENIZER_THREADS:-4}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+DATA_STATS_SOURCE="${DATA_STATS_SOURCE:-}"
+DATA_STATS_SOURCE_BASELINE="${DATA_STATS_SOURCE_BASELINE:-}"
+DATA_STATS_SOURCE_SEMDEDUP="${DATA_STATS_SOURCE_SEMDEDUP:-}"
+DATA_STATS_SOURCE_RANDOMDROP="${DATA_STATS_SOURCE_RANDOMDROP:-}"
 
 export NUM_GPUS DEVICE_BATCH_SIZE DEPTH PARAM_DATA_RATIO NUM_ITERATIONS NUM_TRAIN_SHARDS DATASET_SHARDS MAX_DOCS
 export NANOCHAT_DATA_DIR NANOCHAT_DATASET_NAME NANOCHAT_DATASET_URL NANOCHAT_DATASET_BASE_URL NANOCHAT_DATASET_MAX_SHARD
@@ -427,22 +431,40 @@ run_one() {
         fi
     fi
 
-    STATS_ARGS=(
-        --data-dir "$data_dir"
-        --split train
-        --output "$run_dir/data_stats.json"
-        --tokenizer-batch-size "$TOKENIZER_BATCH_SIZE"
-        --tokenizer-threads "$TOKENIZER_THREADS"
-    )
-    if [[ "$run_kind" == "baseline" ]]; then
-        STATS_ARGS+=(--num-train-shards "$NUM_TRAIN_SHARDS")
+    local stats_source="$DATA_STATS_SOURCE"
+    if [[ "$run_kind" == "baseline" && -n "$DATA_STATS_SOURCE_BASELINE" ]]; then
+        stats_source="$DATA_STATS_SOURCE_BASELINE"
+    elif [[ "$run_kind" == "semdedup" && -n "$DATA_STATS_SOURCE_SEMDEDUP" ]]; then
+        stats_source="$DATA_STATS_SOURCE_SEMDEDUP"
+    elif [[ "$run_kind" == "randomdrop" && -n "$DATA_STATS_SOURCE_RANDOMDROP" ]]; then
+        stats_source="$DATA_STATS_SOURCE_RANDOMDROP"
+    fi
+
+    if [[ -n "$stats_source" ]]; then
+        if [[ ! -f "$stats_source" ]]; then
+            echo "DATA_STATS_SOURCE for $run_kind does not exist: $stats_source" >&2
+            exit 1
+        fi
+        cp "$stats_source" "$run_dir/data_stats.json"
+        echo "Copied data stats from $stats_source"
     else
-        STATS_ARGS+=(--num-train-shards -1)
+        STATS_ARGS=(
+            --data-dir "$data_dir"
+            --split train
+            --output "$run_dir/data_stats.json"
+            --tokenizer-batch-size "$TOKENIZER_BATCH_SIZE"
+            --tokenizer-threads "$TOKENIZER_THREADS"
+        )
+        if [[ "$run_kind" == "baseline" ]]; then
+            STATS_ARGS+=(--num-train-shards "$NUM_TRAIN_SHARDS")
+        else
+            STATS_ARGS+=(--num-train-shards -1)
+        fi
+        if [[ "$STATS_MAX_DOCS" -ge 0 ]]; then
+            STATS_ARGS+=(--max-docs "$STATS_MAX_DOCS")
+        fi
+        "$PYTHON_BIN" -m scripts.climbmix_data_stats "${STATS_ARGS[@]}"
     fi
-    if [[ "$STATS_MAX_DOCS" -ge 0 ]]; then
-        STATS_ARGS+=(--max-docs "$STATS_MAX_DOCS")
-    fi
-    "$PYTHON_BIN" -m scripts.climbmix_data_stats "${STATS_ARGS[@]}"
 
     "$PYTHON_BIN" -m nanochat.report reset
 
