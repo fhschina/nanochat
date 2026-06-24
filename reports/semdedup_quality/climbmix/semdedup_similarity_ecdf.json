@@ -1,0 +1,29 @@
+{
+  "below_documents": 14094802,
+  "below_ratio": 0.9797462508452559,
+  "eps": 0.07,
+  "manifest_keep_ratio_docs": 0.9797462508452559,
+  "manifest_removed_docs": 291374,
+  "max": 1.0,
+  "min": 0.0,
+  "near_one_documents": 25145,
+  "near_one_ratio": 0.0017478584997152823,
+  "quantiles": {
+    "p500": 0.685619056224823,
+    "p900": 0.8465214669704437,
+    "p950": 0.8846089243888855,
+    "p990": 0.96086685359478,
+    "p999": 1.0
+  },
+  "raw_exact_one_documents": 2344,
+  "raw_exact_one_ratio": 0.0001629341946045982,
+  "raw_gt_one_documents": 12684,
+  "raw_gt_one_ratio": 0.0008816797458893872,
+  "raw_max": 1.0000016689300537,
+  "raw_min": 0.0,
+  "removed_documents": 291374,
+  "removed_ratio": 0.02025374915474411,
+  "score_column": "cosine_sim_score",
+  "similarity_threshold": 0.9299999999999999,
+  "total_documents": 14386176
+}

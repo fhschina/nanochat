@@ -144,6 +144,30 @@ runs but came from separate completed run directories. The fact that they are
 not identical is itself useful evidence: training is not fully deterministic
 even after adding seed controls.
 
+## SemDeDup Similarity ECDF
+
+![SemDeDup similarity ECDF](semdedup_similarity_ecdf.svg)
+
+| ECDF statistic | Value |
+| --- | ---: |
+| total documents | 14,386,176 |
+| eps | 0.070000 |
+| similarity threshold | 0.930000 |
+| documents below threshold | 14,094,802 |
+| removed documents | 291,374 |
+| removed ratio | 0.020254 |
+| raw max similarity | 1.000002 |
+| raw >1.0 documents | 12,684 |
+| raw >1.0 ratio | 0.000882 |
+| raw ==1.0 documents | 2,344 |
+| sim >=0.999999 documents | 25,145 |
+| sim >=0.999999 ratio | 0.001748 |
+
+The ECDF x-axis is cosine similarity. For cosine distance SemDeDup, eps maps to
+similarity cutoff `1 - eps`. Raw Curator scores can be slightly above 1.0 from
+floating-point roundoff; the plotted ECDF clips scores to `[0, 1]` and reports
+the affected count.
+
 ## Initial Phase 4 A/B Result
 
 The first full baseline vs SemDeDup comparison used the same 6,612-iteration
