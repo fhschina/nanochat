@@ -1,8 +1,6 @@
 #!/bin/bash
 
-# FineWeb-EDU SemDeDup quality A/B runner.
-# This wrapper reuses the ClimbMix runner, but points NanoChat at the
-# karpathy/fineweb-edu-100b-shuffle parquet repo and keeps outputs isolated.
+# FineWeb-EDU entrypoint for the shared SemDeDup quality A/B runner.
 
 set -euo pipefail
 
@@ -14,4 +12,4 @@ export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat_b200_finewe
 export INPUT_DATA_DIR="${INPUT_DATA_DIR:-$NANOCHAT_BASE_DIR/base_data_fineweb_edu}"
 export RUN_ROOT="${RUN_ROOT:-$NANOCHAT_BASE_DIR/experiments/fineweb_edu_semdedup_quality}"
 
-exec bash runs/climbmix_semdedup_quality_b200.sh "$@"
+exec bash runs/semdedup_quality_b200.sh "$@"

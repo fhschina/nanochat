@@ -153,7 +153,7 @@ run_report() {
         exit 1
     fi
     log "Generating comparison report"
-    python -m scripts.compare_climbmix_experiments \
+    python -m scripts.compare_semdedup_experiments \
         --baseline "$baseline_run" \
         --semdedup "$semdedup_run" \
         --output "$report_path"

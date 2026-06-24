@@ -28,7 +28,7 @@ This branch now includes:
 - `runs/climbmix_task_delta_investigation_b200.sh`, a resumable background
   orchestrator for eval-only repeats, seed repeats, random-drop controls,
   eps sweeps, removed-sample audit, and final aggregation.
-- `scripts/build_random_drop_climbmix.py`, which creates a control dataset by
+- `scripts/build_random_drop_dataset.py`, which creates a control dataset by
   randomly dropping the same number of train documents removed by SemDeDup.
 - `scripts/analyze_climbmix_removed_samples.py`, which audits removed vs kept
   documents for source, length, QA-like, coreference-like, and boilerplate-like

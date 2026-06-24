@@ -26,18 +26,18 @@ ClimbMix and SemDeDup while keeping NanoChat model/training code unchanged.
 
 Added files:
 
-- `dev/CLIMBMIX_SEMDEDUP_EXPERIMENT.md`: experiment runbook and metric plan.
-- `dev/CLIMBMIX_SEMDEDUP_BRANCH_REPORT.md`: this branch report and result
+- `reports/semdedup_quality/climbmix/runbook.md`: experiment runbook and metric plan.
+- `reports/semdedup_quality/climbmix/branch_report.md`: this branch report and result
   summary.
 - `runs/climbmix_semdedup_quality_b200.sh`: one command runner for baseline,
   SemDeDup, or both.
-- `scripts/climbmix_data_stats.py`: tokenizer-based parquet data statistics.
-- `scripts/compare_climbmix_experiments.py`: baseline vs SemDeDup markdown
+- `scripts/parquet_data_stats.py`: tokenizer-based parquet data statistics.
+- `scripts/compare_semdedup_experiments.py`: baseline vs SemDeDup markdown
   comparison generator.
 
 Modified files:
 
-- `scripts/build_semdedup_climbmix.py`
+- `scripts/build_semdedup_dataset.py`
   - stages ClimbMix train shards with stable `doc_id`;
   - runs NeMo Curator `TextSemanticDeduplicationWorkflow`;
   - normalizes output back to NanoChat parquet schema with only `text`;
@@ -131,9 +131,9 @@ export RAY_ADDRESS="127.0.0.1:$RAY_PORT"
 ```bash
 bash -n runs/climbmix_semdedup_quality_b200.sh
 PYTHONPYCACHEPREFIX=/tmp/codex_pycache /usr/bin/python3 -m py_compile \
-  scripts/build_semdedup_climbmix.py \
-  scripts/climbmix_data_stats.py \
-  scripts/compare_climbmix_experiments.py
+  scripts/build_semdedup_dataset.py \
+  scripts/parquet_data_stats.py \
+  scripts/compare_semdedup_experiments.py
 ```
 
 ### Plumbing Smoke Test
@@ -381,7 +381,7 @@ Important artifacts:
 The comparison script reads the run directories and writes a markdown A/B table:
 
 ```bash
-.venv/bin/python -m scripts.compare_climbmix_experiments \
+.venv/bin/python -m scripts.compare_semdedup_experiments \
   --baseline "$NANOCHAT_BASE_DIR/experiments/climbmix_semdedup_quality/full-n170-r9p5-eps0p07-20260611T163000Z_baseline" \
   --semdedup "$NANOCHAT_BASE_DIR/experiments/climbmix_semdedup_quality/full-n170-r9p5-eps0p07-20260612T080000Z_semdedup" \
   --output "$NANOCHAT_BASE_DIR/experiments/climbmix_semdedup_quality/full-n170-r9p5-eps0p07-20260612T080000Z_comparison.md"
@@ -493,7 +493,7 @@ Recommended next checks:
 
 The recommended follow-up checks were implemented and run after the initial
 Phase 4-style baseline vs SemDeDup comparison. See
-`dev/CLIMBMIX_SEMDEDUP_TASK_DELTA_FINAL_REPORT.md` for the final investigation
+`reports/semdedup_quality/climbmix/task_delta_final_report.md` for the final investigation
 summary.
 
 Short version:

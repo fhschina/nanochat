@@ -1,5 +1,5 @@
 """
-Build a random-drop ClimbMix parquet directory for NanoChat controls.
+Build a random-drop parquet directory for NanoChat controls.
 
 This is a non-semantic control for SemDeDup experiments: remove a deterministic
 uniform random subset of train documents while keeping the validation shard
@@ -17,7 +17,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from scripts.build_semdedup_climbmix import (
+from scripts.build_semdedup_dataset import (
     ROW_GROUP_SIZE,
     _parquet_files,
     _quantiles,
@@ -29,6 +29,10 @@ from scripts.build_semdedup_climbmix import (
 
 def _default_base_dir() -> Path:
     return Path(os.environ.get("NANOCHAT_BASE_DIR", Path.home() / ".cache" / "nanochat"))
+
+
+def _default_dataset_tag() -> str:
+    return os.environ.get("DATASET_TAG", "climbmix")
 
 
 def _total_docs(paths: list[Path], max_docs: int) -> int:
@@ -234,7 +238,7 @@ def build_random_drop(args: argparse.Namespace) -> dict:
         input_train["tokens"] = input_tokens
         output_train["tokens"] = output_tokens
 
-    from scripts.build_semdedup_climbmix import _count_texts
+    from scripts.build_semdedup_dataset import _count_texts
 
     output_val = _count_texts([val_output_path], tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
     removed_docs = input_docs - output_docs
@@ -298,8 +302,9 @@ def build_random_drop(args: argparse.Namespace) -> dict:
 
 def parse_args() -> argparse.Namespace:
     base_dir = _default_base_dir()
-    parser = argparse.ArgumentParser(description="Build a random-drop ClimbMix control data directory")
-    parser.add_argument("--input-data-dir", type=Path, default=base_dir / "base_data_climbmix")
+    dataset_tag = _default_dataset_tag()
+    parser = argparse.ArgumentParser(description="Build a random-drop NanoChat control data directory")
+    parser.add_argument("--input-data-dir", type=Path, default=base_dir / f"base_data_{dataset_tag}")
     parser.add_argument("--output-data-dir", type=Path, default=None)
     parser.add_argument("--analysis-output-dir", type=Path, default=None)
     parser.add_argument("--num-train-shards", type=int, default=8, help="Number of train shards to process; -1 means all available train shards")
@@ -315,7 +320,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     if args.output_data_dir is None:
-        args.output_data_dir = base_dir / f"base_data_climbmix_randomdrop_drop{args.target_removed_docs}_seed{args.random_seed}_n{args.num_train_shards}"
+        args.output_data_dir = base_dir / f"base_data_{dataset_tag}_randomdrop_drop{args.target_removed_docs}_seed{args.random_seed}_n{args.num_train_shards}"
     if args.analysis_output_dir is None:
         args.analysis_output_dir = args.output_data_dir
     return args

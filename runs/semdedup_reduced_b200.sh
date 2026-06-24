@@ -68,7 +68,7 @@ SEMD_ARGS=(
 if [ "$SEMD_OVERWRITE" = "1" ]; then
     SEMD_ARGS+=(--overwrite)
 fi
-python -m scripts.build_semdedup_climbmix "${SEMD_ARGS[@]}"
+python -m scripts.build_semdedup_dataset "${SEMD_ARGS[@]}"
 
 TRAIN_HORIZON_ARGS=(--target-param-data-ratio="$PARAM_DATA_RATIO")
 if [ -n "$NUM_ITERATIONS" ]; then

@@ -62,14 +62,14 @@ The best current claim is therefore:
 
 Repo reports:
 
-- `dev/CLIMBMIX_SEMDEDUP_BRANCH_REPORT.md`: original branch report. Its result
+- `reports/semdedup_quality/climbmix/branch_report.md`: original branch report. Its result
   section is mainly the first full A/B run.
-- `dev/CLIMBMIX_SEMDEDUP_TASK_DELTA_FINAL_REPORT.md`: follow-up investigation
+- `reports/semdedup_quality/climbmix/task_delta_final_report.md`: follow-up investigation
   report covering eval-only, random-drop, seed repeats, eps sweep, and audit.
-- `dev/CLIMBMIX_COMMONSENSE_QA_DELTA_ANALYSIS.md`: focused analysis of the
+- `reports/semdedup_quality/climbmix/commonsense_qa_delta_analysis.md`: focused analysis of the
   `commonsense_qa` jump, including removed/kept audit, shard-order analysis,
   and the order-preserving control.
-- `dev/CLIMBMIX_SEMDEDUP_CONSOLIDATED_FINAL_REPORT.md`: this consolidated
+- `reports/semdedup_quality/climbmix/consolidated_final_report.md`: this consolidated
   final report.
 
 Generated artifact:

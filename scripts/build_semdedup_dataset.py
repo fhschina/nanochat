@@ -1,11 +1,11 @@
 """
-Build a SemDeDup-reduced ClimbMix parquet directory for nanochat.
+Build a SemDeDup-reduced parquet directory for NanoChat.
 
 The default backend calls NeMo Curator's TextSemanticDeduplicationWorkflow and
 then normalizes its output to nanochat's expected parquet schema: one `text`
-column, with the original ClimbMix validation shard copied as the final sorted
-shard. The `exact-smoke` backend is dependency-free and exists only to test the
-nanochat data plumbing on a tiny sample; it is not a semantic deduplication
+column, with the original validation shard copied as the final sorted shard.
+The `exact-smoke` backend is dependency-free and exists only to test the
+NanoChat data plumbing on a tiny sample; it is not a semantic deduplication
 experiment.
 """
 
@@ -29,6 +29,10 @@ QUANTILES = (0.0, 0.5, 0.9, 0.95, 0.99, 1.0)
 
 def _default_base_dir() -> Path:
     return Path(os.environ.get("NANOCHAT_BASE_DIR", Path.home() / ".cache" / "nanochat"))
+
+
+def _default_dataset_tag() -> str:
+    return os.environ.get("DATASET_TAG", "climbmix")
 
 
 def _eps_slug(eps: float) -> str:
@@ -718,8 +722,9 @@ def _normalize_to_nanochat(
 
 def parse_args() -> argparse.Namespace:
     base_dir = _default_base_dir()
-    parser = argparse.ArgumentParser(description="Build a SemDeDup-reduced ClimbMix data directory for nanochat")
-    parser.add_argument("--input-data-dir", type=Path, default=base_dir / "base_data_climbmix")
+    dataset_tag = _default_dataset_tag()
+    parser = argparse.ArgumentParser(description="Build a SemDeDup-reduced NanoChat parquet data directory")
+    parser.add_argument("--input-data-dir", type=Path, default=base_dir / f"base_data_{dataset_tag}")
     parser.add_argument("--output-data-dir", type=Path, default=None)
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--analysis-output-dir", type=Path, default=None, help="Directory for SemDeDup audit artifacts and an extra manifest copy")
@@ -773,7 +778,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     if args.output_data_dir is None:
-        args.output_data_dir = base_dir / f"base_data_climbmix_semdedup_eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
+        args.output_data_dir = base_dir / f"base_data_{dataset_tag}_semdedup_eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
     if args.cache_dir is None:
         args.cache_dir = base_dir / "semdedup_cache" / f"eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
     if args.analysis_output_dir is None:

@@ -25,7 +25,7 @@ REFERENCE_SEMDEDUP_RUN="$RUN_ROOT/${REFERENCE_RUN_ID}_semdedup"
 SHARED_SEMD_OUTPUT_DIR="${SHARED_SEMD_OUTPUT_DIR:-$REFERENCE_SEMDEDUP_RUN/base_data_fineweb_edu_semdedup_eps0p07_n170}"
 BASELINE_STATS_SOURCE="${BASELINE_STATS_SOURCE:-$REFERENCE_BASELINE_RUN/data_stats.json}"
 SEMDEDUP_STATS_SOURCE="${SEMDEDUP_STATS_SOURCE:-$REFERENCE_SEMDEDUP_RUN/data_stats.json}"
-ECDF_SVG="${ECDF_SVG:-$RUN_ROOT/fineweb_edu_semdedup_similarity_ecdf.svg}"
+ECDF_SVG="${ECDF_SVG:-$RUN_ROOT/semdedup_similarity_ecdf.svg}"
 ECDF_STATS="${ECDF_STATS:-$RUN_ROOT/fineweb_edu_semdedup_similarity_ecdf.json}"
 MULTI_REPORT="${MULTI_REPORT:-$RUN_ROOT/fineweb_edu_repeats_report.md}"
 MULTI_REPORT_JSON="${MULTI_REPORT_JSON:-$RUN_ROOT/fineweb_edu_repeats_report_summary.json}"
@@ -83,7 +83,7 @@ run_seed_pair() {
 
     if [[ -f "$baseline_run/run_summary.json" && -f "$semdedup_run/run_summary.json" ]]; then
         log "Generating per-seed comparison for seed $seed"
-        .venv/bin/python -m scripts.compare_climbmix_experiments \
+        .venv/bin/python -m scripts.compare_semdedup_experiments \
             --baseline "$baseline_run" \
             --semdedup "$semdedup_run" \
             --output "$pair_report"

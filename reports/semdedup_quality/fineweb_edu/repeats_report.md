@@ -77,7 +77,7 @@ This report compares FineWeb-EDU baseline vs FineWeb-EDU SemDeDup only. Pilot/sm
 
 ## SemDeDup Similarity ECDF
 
-![SemDeDup similarity ECDF](fineweb_edu_semdedup_similarity_ecdf.svg)
+![SemDeDup similarity ECDF](semdedup_similarity_ecdf.svg)
 
 | ECDF statistic | Value |
 |---|---:|

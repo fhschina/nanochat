@@ -198,7 +198,7 @@ stage_smoke() {
         nanochat/common.py \
         scripts/base_train.py \
         scripts/base_eval.py \
-        scripts/build_random_drop_climbmix.py \
+        scripts/build_random_drop_dataset.py \
         scripts/analyze_climbmix_removed_samples.py \
         scripts/aggregate_climbmix_task_delta.py
 

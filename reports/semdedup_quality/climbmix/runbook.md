@@ -91,7 +91,7 @@ bash runs/climbmix_semdedup_quality_b200.sh baseline|semdedup|both
 Data stats:
 
 ```bash
-python -m scripts.climbmix_data_stats \
+python -m scripts.parquet_data_stats \
   --data-dir "$NANOCHAT_BASE_DIR/base_data_climbmix" \
   --split train \
   --num-train-shards 8 \
@@ -101,7 +101,7 @@ python -m scripts.climbmix_data_stats \
 Comparison report:
 
 ```bash
-python -m scripts.compare_climbmix_experiments \
+python -m scripts.compare_semdedup_experiments \
   --baseline "$NANOCHAT_BASE_DIR/experiments/climbmix_semdedup_quality/<baseline_run_id>" \
   --semdedup "$NANOCHAT_BASE_DIR/experiments/climbmix_semdedup_quality/<semdedup_run_id>" \
   --output "$NANOCHAT_BASE_DIR/experiments/climbmix_semdedup_quality/comparison.md"

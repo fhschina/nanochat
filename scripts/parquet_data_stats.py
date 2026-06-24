@@ -1,5 +1,5 @@
 """
-Compute tokenizer-based statistics for NanoChat ClimbMix-style parquet data.
+Compute tokenizer-based statistics for NanoChat parquet data.
 
 The train/val split follows nanochat.dataset/list_parquet_files convention:
 all parquet files except the final sorted shard are train, and the final shard
@@ -141,7 +141,7 @@ def compute_stats(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compute ClimbMix parquet data stats with the active NanoChat tokenizer")
+    parser = argparse.ArgumentParser(description="Compute parquet data stats with the active NanoChat tokenizer")
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--split", choices=["train", "val", "all"], default="train")
     parser.add_argument("--num-train-shards", type=int, default=-1, help="Limit train files before the val shard; -1 means all train files")
