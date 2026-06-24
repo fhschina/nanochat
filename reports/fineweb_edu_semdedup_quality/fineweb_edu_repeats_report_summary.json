@@ -1,0 +1,11 @@
+{
+  "completed_pair_count": 3,
+  "ecdf_svg": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/fineweb_edu_semdedup_similarity_ecdf.svg",
+  "output": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/fineweb_edu_repeats_report.md",
+  "run_root": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality",
+  "seeds": [
+    "42",
+    "43",
+    "44"
+  ]
+}
