@@ -120,6 +120,12 @@ with mixed signs.
 
 ## Arm Summary
 
+Do not compare the five-seed eps0.03 mean directly against one-seed eps sweep
+rows. The promotion decision compares seed42 against seed42 in the EPS Sweep
+table. In that matched comparison, eps0.03 has lower BPB than eps0.09
+(`0.749828` vs `0.750236`). The Arm Summary table is useful for inventory and
+rough context, but rows with different seed counts have different variance.
+
 | Arm | Runs | Seeds | Val BPB mean | CORE mean | Removed docs | Removed tokens |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
 | promoted SemDeDup eps0.03 | 5 | 42, 43, 44, 45, 46 | 0.750329 | 0.2477 | 506,761 | 591,983,518 |
@@ -133,7 +139,8 @@ with mixed signs.
 
 The eps0.07 aggregate row in the generated report mixes historical, pilot, and
 repeat artifacts discovered under the quality root; use `final_report.md` for
-the canonical eps0.07 three-seed analysis.
+the canonical eps0.07 three-seed analysis. Similarly, eps0.05/0.09/0.10 are
+single-seed sweep rows, while promoted eps0.03 is a five-seed expansion row.
 
 ## BoolQ Analysis
 
