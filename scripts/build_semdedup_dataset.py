@@ -322,6 +322,26 @@ def _stage_train_inputs(train_paths: list[Path], staged_dir: Path, max_docs: int
     return {"docs": docs, "chars": chars, "bytes": bytes_, "files": files}
 
 
+def _patch_xenna_monitoring_for_optional_ray_state_api() -> None:
+    try:
+        from cosmos_xenna.pipelines.private import monitoring as xenna_monitoring
+    except Exception:
+        return
+    original = getattr(xenna_monitoring, "get_ray_actors", None)
+    if original is None or getattr(original, "__nanochat_optional_state_api__", False):
+        return
+
+    def get_ray_actors_optional(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except Exception as exc:
+            print(f"Ray state API unavailable for Xenna monitoring; continuing without actor stats: {exc}")
+            return []
+
+    get_ray_actors_optional.__nanochat_optional_state_api__ = True
+    xenna_monitoring.get_ray_actors = get_ray_actors_optional
+
+
 def _preinit_local_ray(args, stage_name: str = "") -> None:
     if args.no_ray_preinit:
         return
@@ -332,6 +352,7 @@ def _preinit_local_ray(args, stage_name: str = "") -> None:
     if ray.is_initialized():
         ray.shutdown()
     os.environ.pop("RAY_ADDRESS", None)
+    os.environ.pop("RAY_API_SERVER_ADDRESS", None)
     os.environ.pop("RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES", None)
     stage_slug = ""
     ray_temp_dir = args.ray_temp_dir.expanduser().resolve()
@@ -339,15 +360,16 @@ def _preinit_local_ray(args, stage_name: str = "") -> None:
         stage_slug = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stage_name)
         ray_temp_dir = ray_temp_dir / stage_slug
     requested_ray_temp_dir = ray_temp_dir
-    if len(str(ray_temp_dir)) > 40:
-        digest = hashlib.sha1(str(ray_temp_dir).encode("utf-8")).hexdigest()[:8]
-        short_stage = (stage_slug or "ray")[:3]
-        ray_temp_dir = Path("/tmp") / f"fw{os.getpid()}_{short_stage}_{digest}"
+    digest = hashlib.sha1(str(ray_temp_dir).encode("utf-8")).hexdigest()[:8]
+    short_stage = (stage_slug or "ray")[:3]
+    ray_temp_dir = Path("/tmp") / f"fw{os.getpid()}_{short_stage}_{digest}"
     ray_temp_dir.mkdir(parents=True, exist_ok=True)
     init_kwargs = {
         "address": "local",
         "_temp_dir": str(ray_temp_dir),
-        "include_dashboard": False,
+        "include_dashboard": os.environ.get("SEMD_RAY_INCLUDE_DASHBOARD", "0") == "1",
+        "dashboard_host": "127.0.0.1",
+        "dashboard_port": 0,
         "ignore_reinit_error": True,
     }
     if stage_name != "kmeans":
@@ -356,14 +378,24 @@ def _preinit_local_ray(args, stage_name: str = "") -> None:
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             }
         }
-    ray.init(**init_kwargs)
+    ray_context = ray.init(**init_kwargs)
     ray_address = ray.get_runtime_context().gcs_address
     os.environ["RAY_ADDRESS"] = ray_address
+    dashboard_url = getattr(ray_context, "dashboard_url", None)
+    if dashboard_url is None:
+        dashboard_url = getattr(ray._private.worker._global_node, "webui_url", None)
+    state_api_address = None
+    if dashboard_url:
+        state_api_address = str(dashboard_url)
+        if "://" not in state_api_address:
+            state_api_address = f"http://{state_api_address}"
+        os.environ["RAY_API_SERVER_ADDRESS"] = state_api_address
     label = f" for {stage_name}" if stage_name else ""
     requested = f", requested_temp_dir={requested_ray_temp_dir}" if requested_ray_temp_dir != ray_temp_dir else ""
+    state_api = f", RAY_API_SERVER_ADDRESS={state_api_address}" if state_api_address else ""
     print(
         f"Initialized isolated local Ray{label} at {ray_address} "
-        f"(temp_dir={ray_temp_dir}, RAY_ADDRESS={ray_address}{requested})"
+        f"(temp_dir={ray_temp_dir}, RAY_ADDRESS={ray_address}{state_api}{requested})"
     )
 
 
@@ -416,6 +448,7 @@ def _require_cached_embeddings(path: Path) -> None:
 
 
 def _run_curator_staged(args, workflow) -> dict:
+    _patch_xenna_monitoring_for_optional_ray_state_api()
     from nemo_curator.backends.ray_actor_pool import RayActorPoolExecutor
     from nemo_curator.backends.xenna import XennaExecutor
     from nemo_curator.stages.deduplication.semantic.workflow import SemanticDeduplicationWorkflow

@@ -81,6 +81,7 @@ AUDIT_SEED="${AUDIT_SEED:-1337}"
 SKIP_TOKEN_STATS="${SKIP_TOKEN_STATS:-0}"
 
 RANDOM_DROP_REMOVED_DOCS="${RANDOM_DROP_REMOVED_DOCS:-291374}"
+RANDOM_DROP_REMOVED_TOKENS="${RANDOM_DROP_REMOVED_TOKENS:-}"
 RANDOM_DROP_SEED="${RANDOM_DROP_SEED:-9001}"
 RANDOM_DROP_OVERWRITE="${RANDOM_DROP_OVERWRITE:-0}"
 
@@ -108,7 +109,7 @@ export SEMD_BACKEND SEMD_MODEL SEMD_EPS SEMD_N_CLUSTERS SEMD_DISTANCE_METRIC SEM
 export SEMD_PAIRWISE_BATCH_SIZE SEMD_EMBEDDING_MAX_CHARS SEMD_VLLM_INIT_KWARGS_JSON
 export SEMD_VLLM_ATTENTION_BACKEND SEMD_VLLM_ENFORCE_EAGER SEMD_RAY_TEMP_DIR SEMD_NO_RAY_PREINIT
 export SEMD_RESUME_FROM_EMBEDDINGS SEMD_REUSE_STAGED_INPUTS
-export RANDOM_DROP_REMOVED_DOCS RANDOM_DROP_SEED RANDOM_DROP_OVERWRITE
+export RANDOM_DROP_REMOVED_DOCS RANDOM_DROP_REMOVED_TOKENS RANDOM_DROP_SEED RANDOM_DROP_OVERWRITE
 export SEED CORE_EVAL_SEED EVAL_EVERY EVAL_TOKENS CORE_METRIC_EVERY CORE_METRIC_MAX_PER_TASK FINAL_CORE_MAX_PER_TASK BASE_EVAL_MODES
 export DO_TRAIN DO_EVAL DO_SEMDEDUP DO_RANDOM_DROP PYTHON_BIN
 
@@ -154,7 +155,7 @@ keys = [
     "SEMD_EMBEDDING_MAX_CHARS", "SEMD_VLLM_INIT_KWARGS_JSON",
     "SEMD_VLLM_ATTENTION_BACKEND", "SEMD_VLLM_ENFORCE_EAGER",
     "SEMD_RAY_TEMP_DIR", "SEMD_NO_RAY_PREINIT", "SEMD_RESUME_FROM_EMBEDDINGS",
-    "SEMD_REUSE_STAGED_INPUTS", "RANDOM_DROP_REMOVED_DOCS",
+    "SEMD_REUSE_STAGED_INPUTS", "RANDOM_DROP_REMOVED_DOCS", "RANDOM_DROP_REMOVED_TOKENS",
     "RANDOM_DROP_SEED", "RANDOM_DROP_OVERWRITE", "SEED", "CORE_EVAL_SEED",
     "EVAL_EVERY", "EVAL_TOKENS", "CORE_METRIC_EVERY", "CORE_METRIC_MAX_PER_TASK",
     "FINAL_CORE_MAX_PER_TASK", "BASE_EVAL_MODES", "DO_TRAIN", "DO_EVAL",
@@ -290,13 +291,17 @@ PY
 
 run_one() {
     local run_kind="$1"
+    local random_drop_label="drop${RANDOM_DROP_REMOVED_DOCS}"
+    if [[ -n "$RANDOM_DROP_REMOVED_TOKENS" ]]; then
+        random_drop_label="droptok${RANDOM_DROP_REMOVED_TOKENS}"
+    fi
     local default_run_id
     if [[ "$run_kind" == "baseline" ]]; then
         default_run_id="baseline_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}_seed${SEED}"
     elif [[ "$run_kind" == "semdedup" ]]; then
         default_run_id="semdedup_eps${SEMD_EPS_SLUG}_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}_seed${SEED}"
     else
-        default_run_id="randomdrop_drop${RANDOM_DROP_REMOVED_DOCS}_rdseed${RANDOM_DROP_SEED}_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}_seed${SEED}"
+        default_run_id="randomdrop_${random_drop_label}_rdseed${RANDOM_DROP_SEED}_${RUN_TIMESTAMP}_d${DEPTH}_n${NUM_TRAIN_SHARDS}_seed${SEED}"
     fi
     local run_id
     if [[ -n "${RUN_ID:-}" ]]; then
@@ -316,7 +321,7 @@ run_one() {
     if [[ "$run_kind" == "semdedup" ]]; then
         data_dir="${SEMD_OUTPUT_DIR:-$run_dir/base_data_${DATASET_TAG}_semdedup_eps${SEMD_EPS_SLUG}_n${NUM_TRAIN_SHARDS}}"
     elif [[ "$run_kind" == "randomdrop" ]]; then
-        data_dir="${RANDOM_DROP_OUTPUT_DIR:-$run_dir/base_data_${DATASET_TAG}_randomdrop_drop${RANDOM_DROP_REMOVED_DOCS}_seed${RANDOM_DROP_SEED}_n${NUM_TRAIN_SHARDS}}"
+        data_dir="${RANDOM_DROP_OUTPUT_DIR:-$run_dir/base_data_${DATASET_TAG}_randomdrop_${random_drop_label}_seed${RANDOM_DROP_SEED}_n${NUM_TRAIN_SHARDS}}"
     fi
 
     local model_tag
@@ -325,7 +330,7 @@ run_one() {
     elif [[ "$run_kind" == "semdedup" ]]; then
         model_tag="${RUN_TAG_SEMDEDUP:-d${DEPTH}-${DATASET_TAG}-semdedup-eps${SEMD_EPS_SLUG}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
     else
-        model_tag="${RUN_TAG_RANDOMDROP:-d${DEPTH}-${DATASET_TAG}-randomdrop-drop${RANDOM_DROP_REMOVED_DOCS}-rdseed${RANDOM_DROP_SEED}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
+        model_tag="${RUN_TAG_RANDOMDROP:-d${DEPTH}-${DATASET_TAG}-randomdrop-${random_drop_label}-rdseed${RANDOM_DROP_SEED}-n${NUM_TRAIN_SHARDS}-seed${SEED}-${RUN_TIMESTAMP}}"
     fi
 
     write_run_config "$run_kind" "$run_id" "$run_dir" "$data_dir" "$model_tag"
@@ -405,13 +410,17 @@ run_one() {
                 --analysis-output-dir "$run_dir"
                 --num-train-shards "$NUM_TRAIN_SHARDS"
                 --max-docs "$MAX_DOCS"
-                --target-removed-docs "$RANDOM_DROP_REMOVED_DOCS"
                 --random-seed "$RANDOM_DROP_SEED"
                 --audit-sample-size "$AUDIT_SAMPLE_SIZE"
                 --audit-seed "$AUDIT_SEED"
                 --tokenizer-batch-size "$TOKENIZER_BATCH_SIZE"
                 --tokenizer-threads "$TOKENIZER_THREADS"
             )
+            if [[ -n "$RANDOM_DROP_REMOVED_TOKENS" ]]; then
+                RANDOM_DROP_ARGS+=(--target-removed-tokens "$RANDOM_DROP_REMOVED_TOKENS")
+            else
+                RANDOM_DROP_ARGS+=(--target-removed-docs "$RANDOM_DROP_REMOVED_DOCS")
+            fi
             if [[ "$RANDOM_DROP_OVERWRITE" == "1" || "$SEMD_OVERWRITE" == "1" ]]; then
                 RANDOM_DROP_ARGS+=(--overwrite)
             fi

@@ -8,6 +8,7 @@ column, plus analysis artifacts that mirror the SemDeDup builder.
 """
 
 import argparse
+from array import array
 import json
 import os
 import random
@@ -65,6 +66,56 @@ def _sample_positions(total_docs: int, sample_size: int, seed: int, excluded: se
     return out
 
 
+def _token_lengths_by_position(
+    paths: list[Path],
+    max_docs: int,
+    tokenizer,
+    tokenizer_batch_size: int,
+    tokenizer_threads: int,
+) -> array:
+    remaining = None if max_docs < 0 else max_docs
+    lengths = array("Q")
+    for path in paths:
+        if remaining == 0:
+            break
+        pf = pq.ParquetFile(path)
+        for rg_idx in range(pf.num_row_groups):
+            if remaining == 0:
+                break
+            table = pf.read_row_group(rg_idx, columns=["text"])
+            texts = [(text or "") for text in table.column("text").to_pylist()]
+            if remaining is not None and len(texts) > remaining:
+                texts = texts[:remaining]
+            lengths.extend(_token_lengths(tokenizer, texts, tokenizer_batch_size, tokenizer_threads))
+            if remaining is not None:
+                remaining -= len(texts)
+    return lengths
+
+
+def _sample_positions_for_token_target(token_lengths: array, target_removed_tokens: int, seed: int) -> tuple[set[int], int]:
+    if target_removed_tokens < 0:
+        raise ValueError("--target-removed-tokens must be >= 0")
+    total_tokens = sum(token_lengths)
+    if target_removed_tokens >= total_tokens:
+        raise ValueError(f"Cannot remove {target_removed_tokens} tokens from only {total_tokens} selected tokens")
+    rng = random.Random(seed)
+    positions = list(range(len(token_lengths)))
+    rng.shuffle(positions)
+    removed: set[int] = set()
+    removed_tokens = 0
+    for pos in positions:
+        length = int(token_lengths[pos])
+        before = removed_tokens
+        removed.add(pos)
+        removed_tokens += length
+        if removed_tokens >= target_removed_tokens:
+            if abs(before - target_removed_tokens) < abs(removed_tokens - target_removed_tokens):
+                removed.remove(pos)
+                removed_tokens = before
+            break
+    return removed, removed_tokens
+
+
 def _length_stats(char_lengths: list[int], token_lengths: list[int] | None = None) -> dict:
     stats = {"char_length_quantiles": _quantiles(char_lengths)}
     if token_lengths is not None:
@@ -93,20 +144,41 @@ def build_random_drop(args: argparse.Namespace) -> dict:
     _reset_dir(args.output_data_dir, overwrite=args.overwrite)
 
     tokenizer = None
-    if not args.skip_token_stats:
+    if not args.skip_token_stats or args.target_removed_tokens is not None:
         from nanochat.tokenizer import get_tokenizer
 
         tokenizer = get_tokenizer()
 
     train_paths, val_path = _select_train_val(args.input_data_dir, args.num_train_shards)
     total_docs = _total_docs(train_paths, args.max_docs)
-    if args.target_removed_docs < 0:
-        raise ValueError("--target-removed-docs must be >= 0")
-    if args.target_removed_docs >= total_docs:
-        raise ValueError(f"Cannot remove {args.target_removed_docs} docs from only {total_docs} selected docs")
-
+    target_removed_tokens = args.target_removed_tokens
+    token_target_actual = None
     rng = random.Random(args.random_seed)
-    removed_positions = set(rng.sample(range(total_docs), args.target_removed_docs))
+    if args.target_removed_docs is not None:
+        if args.target_removed_docs < 0:
+            raise ValueError("--target-removed-docs must be >= 0")
+        if args.target_removed_docs >= total_docs:
+            raise ValueError(f"Cannot remove {args.target_removed_docs} docs from only {total_docs} selected docs")
+        removed_positions = set(rng.sample(range(total_docs), args.target_removed_docs))
+    else:
+        if tokenizer is None:
+            raise ValueError("--target-removed-tokens requires token stats; remove --skip-token-stats")
+        token_lengths_for_selection = _token_lengths_by_position(
+            train_paths,
+            args.max_docs,
+            tokenizer,
+            args.tokenizer_batch_size,
+            args.tokenizer_threads,
+        )
+        if len(token_lengths_for_selection) != total_docs:
+            raise RuntimeError(
+                f"Token selection scanned {len(token_lengths_for_selection)} docs, expected {total_docs}"
+            )
+        removed_positions, token_target_actual = _sample_positions_for_token_target(
+            token_lengths_for_selection,
+            target_removed_tokens,
+            args.random_seed,
+        )
     removed_sample_positions = set(rng.sample(sorted(removed_positions), min(args.audit_sample_size, len(removed_positions))))
     kept_sample_positions = _sample_positions(total_docs, args.audit_sample_size, args.audit_seed, excluded=removed_positions)
 
@@ -244,6 +316,14 @@ def build_random_drop(args: argparse.Namespace) -> dict:
     removed_docs = input_docs - output_docs
     removed_chars = input_chars - output_chars
     removed_tokens = None if tokenizer is None else input_tokens - output_tokens
+    if token_target_actual is None:
+        token_target_actual = removed_tokens
+    removed_doc_error = None
+    if args.target_removed_docs is not None and args.target_removed_docs:
+        removed_doc_error = abs(removed_docs - args.target_removed_docs) / args.target_removed_docs
+    removed_token_error = None
+    if target_removed_tokens is not None and target_removed_tokens:
+        removed_token_error = abs((removed_tokens or 0) - target_removed_tokens) / target_removed_tokens
 
     manifest = {
         "backend": "random-drop",
@@ -257,7 +337,14 @@ def build_random_drop(args: argparse.Namespace) -> dict:
         "random_drop_config": {
             "random_seed": args.random_seed,
             "audit_seed": args.audit_seed,
+            "selection_mode": "token_matched" if target_removed_tokens is not None else "doc_matched",
             "target_removed_docs": args.target_removed_docs,
+            "target_removed_tokens": target_removed_tokens,
+            "actual_removed_docs": removed_docs,
+            "actual_removed_tokens": removed_tokens,
+            "preselected_removed_tokens": token_target_actual,
+            "relative_removed_doc_error": removed_doc_error,
+            "relative_removed_token_error": removed_token_error,
             "selected_docs": total_docs,
         },
         "token_stats": {
@@ -309,7 +396,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-output-dir", type=Path, default=None)
     parser.add_argument("--num-train-shards", type=int, default=8, help="Number of train shards to process; -1 means all available train shards")
     parser.add_argument("--max-docs", type=int, default=-1, help="Optional cap for smoke/pilot runs; -1 means no cap")
-    parser.add_argument("--target-removed-docs", type=int, default=291374, help="Exact number of selected train docs to remove")
+    parser.add_argument("--target-removed-docs", type=int, default=None, help="Exact number of selected train docs to remove")
+    parser.add_argument("--target-removed-tokens", type=int, default=None, help="Approximate number of selected train tokens to remove; mutually exclusive with --target-removed-docs")
     parser.add_argument("--random-seed", type=int, default=9001, help="Seed for selecting removed docs")
     parser.add_argument("--audit-sample-size", type=int, default=1000, help="Number of kept/removed docs to sample for manual inspection")
     parser.add_argument("--audit-seed", type=int, default=1337, help="Seed for deterministic kept audit samples")
@@ -319,8 +407,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
+    if args.target_removed_docs is None and args.target_removed_tokens is None:
+        args.target_removed_docs = 291374
+    if args.target_removed_docs is not None and args.target_removed_tokens is not None:
+        parser.error("--target-removed-docs and --target-removed-tokens are mutually exclusive")
+    if args.target_removed_docs is not None and args.target_removed_docs < 0:
+        parser.error("--target-removed-docs must be >= 0")
+    if args.target_removed_tokens is not None and args.target_removed_tokens < 0:
+        parser.error("--target-removed-tokens must be >= 0")
+    if args.target_removed_tokens is not None and args.skip_token_stats:
+        parser.error("--target-removed-tokens requires token stats; remove --skip-token-stats")
+    drop_label = (
+        f"droptok{args.target_removed_tokens}"
+        if args.target_removed_tokens is not None
+        else f"drop{args.target_removed_docs}"
+    )
     if args.output_data_dir is None:
-        args.output_data_dir = base_dir / f"base_data_{dataset_tag}_randomdrop_drop{args.target_removed_docs}_seed{args.random_seed}_n{args.num_train_shards}"
+        args.output_data_dir = base_dir / f"base_data_{dataset_tag}_randomdrop_{drop_label}_seed{args.random_seed}_n{args.num_train_shards}"
     if args.analysis_output_dir is None:
         args.analysis_output_dir = args.output_data_dir
     return args
