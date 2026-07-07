@@ -12,13 +12,18 @@ label sheets are triage artifacts only.
 
 ## Executive Summary
 
-FineWeb-EDU SemDeDup remains promising, but the best threshold in this follow-up
-is lower than the original eps0.07 setting.
+FineWeb-EDU SemDeDup remains promising, and the threshold promoted by the
+predefined BPB-primary selection rule is lower than the original eps0.07
+setting. This is not the same as choosing the highest single-seed CORE score.
 
 - The promotion rule selected `eps=0.03`: compared with eps0.07 seed42, it
   improved BPB by at least 0.0002 while keeping CORE within the allowed window.
+  CORE was a guardrail in this rule, not the objective being maximized.
 - The selected eps0.03 removes 506,761 train documents and 591.98M train tokens,
   less than eps0.07's 633,070 documents and 775.61M tokens.
+- eps0.09 has the highest seed42 CORE among the sweep points, but it was not
+  promoted because its BPB did not improve versus the eps0.07 seed42 reference
+  and it removes substantially more data.
 - Across the five-seed promoted run, eps0.03 has mean validation BPB `0.750329`
   and mean CORE `0.2477`.
 - Relative to matched full baseline seeds 43-46, eps0.03 improves BPB on every
@@ -33,10 +38,10 @@ is lower than the original eps0.07 setting.
   0.03, 0.05, 0.07, 0.09, and 0.10, but no human precision estimate should be
   claimed from them yet.
 
-The best current claim is: for FineWeb-EDU at this budget, eps0.03 is the most
-attractive SemDeDup setting tested so far, with consistent BPB improvement over
-matched full baselines and competitive CORE, but downstream task behavior and
-manual false-positive risk still need review.
+The best current claim is: for FineWeb-EDU at this budget, eps0.03 is the
+promoted SemDeDup setting under the predefined rule, with consistent BPB
+improvement over matched full baselines and competitive CORE. It should not be
+described as the best setting by CORE alone.
 
 ## Dataset And Setup
 
@@ -92,7 +97,10 @@ to fewer removed tokens.
 | 0.09 | 42 | 0.750236 | 0.2648 | 745,890 | 949,184,575 | no |
 | 0.10 | 42 | 0.750802 | 0.2587 | 831,176 | 1,075,119,963 | no |
 
-eps0.03 is the only tested sweep point that passes the promotion rule.
+eps0.03 is the only tested sweep point that passes the promotion rule. eps0.09
+has the best seed42 CORE in the sweep table, but it is not promotion-eligible
+because BPB is slightly worse than the eps0.07 seed42 reference
+(`0.750236` vs `0.750224`) and it removes many more tokens.
 
 ## Seed Expansion
 
@@ -190,8 +198,10 @@ without monitor data are marked unavailable there.
 
 The original eps0.07 setting removed a large amount of FineWeb-EDU and showed a
 small but promising three-seed result. This follow-up suggests that a less
-aggressive eps0.03 threshold preserves more data while improving the seed42 BPB
-selection criterion and maintaining competitive CORE.
+aggressive eps0.03 threshold preserves more data while satisfying the seed42 BPB
+promotion criterion and maintaining competitive CORE. eps0.09 remains an
+interesting CORE-positive single-seed point, but it did not meet the BPB
+promotion criterion and was not expanded to five seeds.
 
 The random-drop controls reduce the chance that the result is only "less data
 is better." The promoted SemDeDup arm has better five-seed mean BPB and CORE
