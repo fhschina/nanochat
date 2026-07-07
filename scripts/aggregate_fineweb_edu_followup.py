@@ -285,14 +285,36 @@ def _run_key(run: dict[str, Any]) -> str:
     return run["arm"]
 
 
+def _is_formal_run(run: dict[str, Any]) -> bool:
+    run_id = str(run.get("run_id") or "").lower()
+    run_dir = str(run.get("run_dir") or "").lower()
+    return not any(marker in run_id or marker in run_dir for marker in ("pilot", "smoke"))
+
+
+def _prefer_formal_by_seed(runs: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    for run in runs:
+        seed = run.get("seed")
+        if seed is None:
+            continue
+        current = out.get(seed)
+        if current is None:
+            out[seed] = run
+            continue
+        if _is_formal_run(run) and not _is_formal_run(current):
+            out[seed] = run
+    return out
+
+
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     runs = payload["runs"]
+    formal_runs = [run for run in runs if _is_formal_run(run)]
     promotion = payload["promotion"]
     removed_audits = payload["removed_audits"]
     pair_audits = payload["pair_audits"]
     dmon = payload["dmon"]
     groups = defaultdict(list)
-    for run in runs:
+    for run in formal_runs:
         groups[_run_key(run)].append(run)
 
     lines = [
@@ -329,8 +351,8 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             f"{_fmt(_mean([r.get('core') for r in group]), 4)} | {_fmt(_mean([r.get('removed_docs') for r in group]), 0)} | {_fmt(_mean([r.get('removed_tokens') for r in group]), 0)} |"
         )
 
-    baseline_by_seed = {r.get("seed"): r for r in runs if r["arm"] == "baseline" and r.get("seed") is not None}
-    promoted_by_seed = {r.get("seed"): r for r in runs if r["arm"] == "semdedup" and r.get("eps") == promotion["promoted_eps"] and r.get("seed") is not None}
+    baseline_by_seed = _prefer_formal_by_seed([r for r in runs if r["arm"] == "baseline"])
+    promoted_by_seed = _prefer_formal_by_seed([r for r in runs if r["arm"] == "semdedup" and r.get("eps") == promotion["promoted_eps"]])
     lines.extend(["", "## Seed Expansion", "", "| Seed | Baseline | Promoted SemDeDup | Delta BPB | Delta CORE |", "| ---: | --- | --- | ---: | ---: |"])
     for seed in DESIRED_SEEDS:
         base = baseline_by_seed.get(seed)

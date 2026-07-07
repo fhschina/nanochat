@@ -1,34 +1,34 @@
 {
   "dmon": [
     {
-      "avg_sm_util": 47.71573724007561,
+      "avg_sm_util": 46.50996972887602,
       "max_sm_util": 100.0,
       "path": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T034025Z.log",
-      "samples": 29624
+      "samples": 30392
     },
     {
-      "avg_sm_util": 61.87478062478063,
+      "avg_sm_util": 59.857809847198645,
       "max_sm_util": 100.0,
       "path": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175443Z.log",
-      "samples": 22792
+      "samples": 23560
     },
     {
-      "avg_sm_util": 61.98569171348315,
+      "avg_sm_util": 59.964419157608695,
       "max_sm_util": 100.0,
       "path": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175531Z.log",
-      "samples": 22784
+      "samples": 23552
     },
     {
-      "avg_sm_util": 62.210399085794656,
+      "avg_sm_util": 60.17903911564626,
       "max_sm_util": 100.0,
       "path": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175925Z.log",
-      "samples": 22752
+      "samples": 23520
     },
     {
-      "avg_sm_util": 67.4877128482972,
+      "avg_sm_util": 65.07024253731343,
       "max_sm_util": 100.0,
       "path": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T221924Z.log",
-      "samples": 20672
+      "samples": 21440
     }
   ],
   "followup_root": "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup",

@@ -23,16 +23,14 @@ Promotion rule: versus eps0.07 seed42, require BPB improvement >= 0.0002 and COR
 
 | Arm | Runs | Seeds | Val BPB mean | CORE mean | Removed docs | Removed tokens |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
-| baseline | 6 | 42, 43, 44, 45, 46 | 0.784173 | 0.2231 | - | - |
-| randomdrop_doc_matched_rd9001_target100 | 1 | 42 | - | - | 100 | - |
+| baseline | 5 | 42, 43, 44, 45, 46 | 0.750860 | 0.2461 | - | - |
 | randomdrop_doc_matched_rd9001_target506761 | 1 | 42 | 0.750486 | 0.2437 | 506761 | 518165985 |
 | randomdrop_doc_matched_rd9001_target633070 | 5 | 42, 43, 44, 45, 46 | 0.750884 | 0.2422 | 633070 | 647840433 |
 | randomdrop_doc_matched_rd9002_target633070 | 1 | 42 | 0.750518 | 0.2354 | 633070 | 651676999 |
-| randomdrop_token_matched_rd9001_target20000 | 1 | 42 | - | - | 23 | 19841 |
 | randomdrop_token_matched_rd9001_target775605001 | 1 | 42 | 0.750554 | 0.2492 | 756313 | 775604971 |
 | semdedup_eps0.03 | 5 | 42, 43, 44, 45, 46 | 0.750329 | 0.2477 | 506761 | 591983518 |
 | semdedup_eps0.05 | 1 | 42 | 0.750040 | 0.2385 | 564673 | 674170865 |
-| semdedup_eps0.07 | 6 | 42, 43, 44 | 0.800211 | 0.2110 | 316823 | 582285743 |
+| semdedup_eps0.07 | 3 | 42, 43, 44 | 0.750296 | 0.2462 | 633070 | 775605001 |
 | semdedup_eps0.09 | 1 | 42 | 0.750236 | 0.2648 | 745890 | 949184575 |
 | semdedup_eps0.10 | 1 | 42 | 0.750802 | 0.2587 | 831176 | 1075119963 |
 
@@ -40,7 +38,7 @@ Promotion rule: versus eps0.07 seed42, require BPB improvement >= 0.0002 and COR
 
 | Seed | Baseline | Promoted SemDeDup | Delta BPB | Delta CORE |
 | ---: | --- | --- | ---: | ---: |
-| 42 | pilot-n8-i400-baseline | full-semdedup-eps0p03-seed42-n170-r9p5 | -0.200911 | 0.1412 |
+| 42 | full-n170-r9p5-eps0p07-20260622T192524Z_baseline | full-semdedup-eps0p03-seed42-n170-r9p5 | -0.000677 | 0.0029 |
 | 43 | repeat-20260624T000845Z-seed43-n170-r9p5-eps0p07_baseline | full-semdedup-eps0p03-seed43-n170-r9p5 | -0.000503 | 0.0082 |
 | 44 | repeat-20260624T000845Z-seed44-n170-r9p5-eps0p07_baseline | full-semdedup-eps0p03-seed44-n170-r9p5 | -0.000319 | 0.0038 |
 | 45 | full-baseline-seed45-n170-r9p5 | full-semdedup-eps0p03-seed45-n170-r9p5 | -0.000492 | -0.0068 |
@@ -50,7 +48,7 @@ Promotion rule: versus eps0.07 seed42, require BPB improvement >= 0.0002 and COR
 
 | Seed | Baseline BoolQ | Promoted SemDeDup BoolQ | Delta |
 | ---: | ---: | ---: | ---: |
-| 42 | -0.1000 | -0.1500 | -0.0500 |
+| 42 | -0.1725 | -0.1500 | 0.0225 |
 | 43 | -0.1838 | -0.1581 | 0.0258 |
 | 44 | -0.1621 | -0.0993 | 0.0628 |
 | 45 | -0.0768 | -0.0486 | 0.0282 |
@@ -125,11 +123,11 @@ Removed/kept heuristic audits: `5`. Pair audit sheets: `5`.
 | `full-semdedup-eps0p10-seed42-n170-r9p5` | semdedup eps0.10 | 42 | 3750.2 | 5154.6 | 1345048.0 | 0.780 |
 
 GPU dmon logs:
-- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T034025Z.log` samples=29624 avg_sm=47.72 max_sm=100.00
-- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175443Z.log` samples=22792 avg_sm=61.87 max_sm=100.00
-- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175531Z.log` samples=22784 avg_sm=61.99 max_sm=100.00
-- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175925Z.log` samples=22752 avg_sm=62.21 max_sm=100.00
-- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T221924Z.log` samples=20672 avg_sm=67.49 max_sm=100.00
+- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T034025Z.log` samples=30392 avg_sm=46.51 max_sm=100.00
+- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175443Z.log` samples=23560 avg_sm=59.86 max_sm=100.00
+- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175531Z.log` samples=23552 avg_sm=59.96 max_sm=100.00
+- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T175925Z.log` samples=23520 avg_sm=60.18 max_sm=100.00
+- `/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_followup/logs/dmon.all.20260705T221924Z.log` samples=21440 avg_sm=65.07 max_sm=100.00
 
 ## Remaining Work
 

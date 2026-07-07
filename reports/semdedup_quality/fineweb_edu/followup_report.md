@@ -130,17 +130,16 @@ rough context, but rows with different seed counts have different variance.
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
 | promoted SemDeDup eps0.03 | 5 | 42, 43, 44, 45, 46 | 0.750329 | 0.2477 | 506,761 | 591,983,518 |
 | SemDeDup eps0.05 | 1 | 42 | 0.750040 | 0.2385 | 564,673 | 674,170,865 |
-| SemDeDup eps0.07 reference | 6 discovered | 42, 43, 44 | 0.800211 | 0.2110 | 633,070 seed42 reference | 775,605,001 seed42 reference |
+| SemDeDup eps0.07 reference | 3 formal | 42, 43, 44 | 0.750296 | 0.2462 | 633,070 | 775,605,001 |
 | SemDeDup eps0.09 | 1 | 42 | 0.750236 | 0.2648 | 745,890 | 949,184,575 |
 | SemDeDup eps0.10 | 1 | 42 | 0.750802 | 0.2587 | 831,176 | 1,075,119,963 |
 | random-drop doc-matched original removal | 5 | 42, 43, 44, 45, 46 | 0.750884 | 0.2422 | 633,070 | 647,840,433 |
 | random-drop token-matched original removal | 1 | 42 | 0.750554 | 0.2492 | 756,313 | 775,604,971 |
 | random-drop promoted-doc removal | 1 | 42 | 0.750486 | 0.2437 | 506,761 | 518,165,985 |
 
-The eps0.07 aggregate row in the generated report mixes historical, pilot, and
-repeat artifacts discovered under the quality root; use `final_report.md` for
-the canonical eps0.07 three-seed analysis. Similarly, eps0.05/0.09/0.10 are
-single-seed sweep rows, while promoted eps0.03 is a five-seed expansion row.
+The eps0.07 row is the canonical three formal-run mean from `final_report.md`
+and `repeats_report.md`. eps0.05/0.09/0.10 are single-seed sweep rows, while
+promoted eps0.03 is a five-seed expansion row.
 
 ## BoolQ Analysis
 
