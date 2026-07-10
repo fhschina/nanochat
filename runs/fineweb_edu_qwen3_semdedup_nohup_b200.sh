@@ -31,6 +31,14 @@ QWEN_SEED44_RUN="${QWEN_SEED44_RUN:-$RUN_ROOT/$QWEN_SEED44_RUN_ID}"
 QWEN_SEMD_OUTPUT_DIR="${QWEN_SEMD_OUTPUT_DIR:-$QWEN_SEED42_RUN/base_data_fineweb_edu_semdedup_eps0p07_n170}"
 QWEN_DATA_STATS_SOURCE="${QWEN_DATA_STATS_SOURCE:-$QWEN_SEED42_RUN/data_stats.json}"
 QWEN_DRY_RUN_CONFIG="${QWEN_DRY_RUN_CONFIG:-$RUN_ROOT/qwen3_curator_dry_run_config.json}"
+QWEN_STAGED_DOCS_PER_FILE="${QWEN_STAGED_DOCS_PER_FILE:-512}"
+QWEN_INPUT_FILES_PER_PARTITION="${QWEN_INPUT_FILES_PER_PARTITION:-1}"
+QWEN_EMBEDDING_MAX_CHARS="${QWEN_EMBEDDING_MAX_CHARS:-16384}"
+QWEN_KMEANS_FILES_PER_GROUP="${QWEN_KMEANS_FILES_PER_GROUP:-128}"
+QWEN_VLLM_INIT_KWARGS_JSON="${QWEN_VLLM_INIT_KWARGS_JSON:-}"
+if [[ -z "$QWEN_VLLM_INIT_KWARGS_JSON" ]]; then
+    QWEN_VLLM_INIT_KWARGS_JSON='{"max_model_len":32768,"max_num_seqs":64,"max_num_batched_tokens":32768,"gpu_memory_utilization":0.82}'
+fi
 
 BASELINE_SEED42="${BASELINE_SEED42:-$OLD_RUN_ROOT/full-n170-r9p5-eps0p07-20260622T192524Z_baseline}"
 BASELINE_SEED43="${BASELINE_SEED43:-$OLD_RUN_ROOT/repeat-20260624T000845Z-seed43-n170-r9p5-eps0p07_baseline}"
@@ -89,6 +97,11 @@ dry_run_qwen_curator_config() {
     .venv/bin/python -m scripts.build_semdedup_dataset \
         --model-identifier qwen3-embedding-8b \
         --num-train-shards 170 \
+        --staged-docs-per-file "$QWEN_STAGED_DOCS_PER_FILE" \
+        --embedding-max-chars "$QWEN_EMBEDDING_MAX_CHARS" \
+        --embedding-vllm-init-kwargs-json "$QWEN_VLLM_INIT_KWARGS_JSON" \
+        --input-files-per-partition "$QWEN_INPUT_FILES_PER_PARTITION" \
+        --kmeans-files-per-group "$QWEN_KMEANS_FILES_PER_GROUP" \
         --eps 0.07 \
         --n-clusters 100 \
         --dry-run-curator-config \
@@ -102,7 +115,7 @@ dry_run_qwen_curator_config() {
         echo "Dry-run did not resolve to Qwen/Qwen3-Embedding-8B" >&2
         return 1
     fi
-    for needle in '"runner": "pooling"' '"convert": "embed"' '"dtype": "bfloat16"' '"enforce_eager": true' '"backend": "TRITON_ATTN"'; do
+    for needle in '"runner": "pooling"' '"convert": "embed"' '"dtype": "bfloat16"' '"enforce_eager": true' '"backend": "TRITON_ATTN"' '"resolved_embedding_dim": 4096' '"kmeans_files_per_group": 128'; do
         if ! grep -q "$needle" "$QWEN_DRY_RUN_CONFIG"; then
             echo "Dry-run config is missing expected Qwen3 setting: $needle" >&2
             return 1
@@ -124,6 +137,11 @@ run_seed42() {
     SEMD_N_CLUSTERS=100 \
     SEMD_MODEL_IDENTIFIER=qwen3-embedding-8b \
     SEMD_OUTPUT_DIR="$QWEN_SEMD_OUTPUT_DIR" \
+    SEMD_STAGED_DOCS_PER_FILE="$QWEN_STAGED_DOCS_PER_FILE" \
+    SEMD_INPUT_FILES_PER_PARTITION="$QWEN_INPUT_FILES_PER_PARTITION" \
+    SEMD_EMBEDDING_MAX_CHARS="$QWEN_EMBEDDING_MAX_CHARS" \
+    SEMD_KMEANS_FILES_PER_GROUP="$QWEN_KMEANS_FILES_PER_GROUP" \
+    SEMD_VLLM_INIT_KWARGS_JSON="$QWEN_VLLM_INIT_KWARGS_JSON" \
     SEMD_RAY_TEMP_DIR="${QWEN_SEMD_RAY_TEMP_DIR:-/tmp/fwe_qwen3_ray_seed42}" \
     SEMD_OVERWRITE="${QWEN_SEMD_OVERWRITE:-0}" \
     DO_SEMDEDUP=1 \
