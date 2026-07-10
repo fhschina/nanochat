@@ -25,6 +25,82 @@ import pyarrow.parquet as pq
 
 ROW_GROUP_SIZE = 1024
 QUANTILES = (0.0, 0.5, 0.9, 0.95, 0.99, 1.0)
+DEFAULT_EMBEDDING_MODEL = "google/embeddinggemma-300m"
+
+
+EMBEDDING_MODEL_PRESETS = {
+    "embeddinggemma-300m": {
+        "model_identifier": "google/embeddinggemma-300m",
+        "aliases": ("google/embeddinggemma-300m", "embeddinggemma", "embedding-gemma-300m"),
+        "embedding_dim": 768,
+        "vllm_init_kwargs": {},
+        "note": "Curator default used by the existing SemDeDup reports.",
+    },
+    "qwen3-embedding-8b": {
+        "model_identifier": "Qwen/Qwen3-Embedding-8B",
+        "aliases": ("qwen/qwen3-embedding-8b", "qwen3-8b", "qwen3"),
+        "embedding_dim": 4096,
+        "vllm_init_kwargs": {
+            "runner": "pooling",
+            "convert": "embed",
+            "dtype": "bfloat16",
+            "enforce_eager": True,
+            "attention_config": {"backend": "TRITON_ATTN"},
+            "trust_remote_code": True,
+        },
+        "note": "High-capacity Qwen3 embedding model; tune eps separately from EmbeddingGemma.",
+    },
+    "nv-embed-v2": {
+        "model_identifier": "nvidia/NV-Embed-v2",
+        "aliases": ("nvidia/nv-embed-v2", "nvembed-v2", "nvembed"),
+        "embedding_dim": 4096,
+        "vllm_init_kwargs": {
+            "runner": "pooling",
+            "convert": "embed",
+            "dtype": "bfloat16",
+            "enforce_eager": True,
+            "attention_config": {"backend": "TRITON_ATTN"},
+            "trust_remote_code": True,
+        },
+        "runtime_blocker": (
+            "Current Curator/vLLM runtime cannot execute nvidia/NV-Embed-v2: "
+            "vLLM 0.16 rejects NVEmbedModel, and the Transformers fallback hits "
+            "NV remote-code incompatibilities with the installed Transformers API. "
+            "Use --allow-unsupported-embedding-model only after changing the runtime."
+        ),
+        "note": "NVIDIA generalist embedding model; registered as a preset but blocked in this runtime.",
+    },
+    "bge-m3": {
+        "model_identifier": "BAAI/bge-m3",
+        "aliases": ("baai/bge-m3", "bge-m3-embedding"),
+        "embedding_dim": 1024,
+        "vllm_init_kwargs": {
+            "runner": "pooling",
+            "convert": "embed",
+            "dtype": "bfloat16",
+            "enforce_eager": True,
+            "attention_config": {"backend": "TRITON_ATTN"},
+        },
+        "note": "BGE multilingual, multifunctional embedding model.",
+    },
+}
+
+
+EMBEDDING_MODEL_LOOKUP = None
+
+
+def _embedding_model_lookup() -> dict[str, str]:
+    global EMBEDDING_MODEL_LOOKUP
+    if EMBEDDING_MODEL_LOOKUP is not None:
+        return EMBEDDING_MODEL_LOOKUP
+    lookup = {}
+    for preset_name, preset in EMBEDDING_MODEL_PRESETS.items():
+        lookup[preset_name.lower()] = preset_name
+        lookup[str(preset["model_identifier"]).lower()] = preset_name
+        for alias in preset.get("aliases", ()):
+            lookup[str(alias).lower()] = preset_name
+    EMBEDDING_MODEL_LOOKUP = lookup
+    return lookup
 
 
 def _default_base_dir() -> Path:
@@ -271,7 +347,27 @@ def _reset_dir(path: Path, overwrite: bool) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _stage_train_inputs(train_paths: list[Path], staged_dir: Path, max_docs: int, overwrite: bool) -> dict:
+def _ordered_unique(values: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _stage_train_inputs(
+    train_paths: list[Path],
+    staged_dir: Path,
+    max_docs: int,
+    overwrite: bool,
+    staged_docs_per_file: int | None = None,
+) -> dict:
+    if staged_docs_per_file is not None and staged_docs_per_file <= 0:
+        raise ValueError("--staged-docs-per-file must be positive when set")
+
     _reset_dir(staged_dir, overwrite=overwrite)
     docs = 0
     chars = 0
@@ -282,12 +378,42 @@ def _stage_train_inputs(train_paths: list[Path], staged_dir: Path, max_docs: int
     for shard_idx, src_path in enumerate(train_paths):
         if remaining == 0:
             break
-        dst_path = staged_dir / f"shard_{shard_idx:05d}.parquet"
         pf = pq.ParquetFile(src_path)
         writer = None
+        dst_path = None
         file_docs = 0
         file_chars = 0
+        chunk_idx = 0
         row_offset = 0
+
+        def next_dst_path() -> Path:
+            if staged_docs_per_file is None:
+                return staged_dir / f"shard_{shard_idx:05d}.parquet"
+            return staged_dir / f"shard_{shard_idx:05d}_part{chunk_idx:05d}.parquet"
+
+        def close_writer() -> None:
+            nonlocal writer, dst_path, file_docs, file_chars, bytes_, chunk_idx
+            if writer is None:
+                return
+            writer.close()
+            if dst_path is not None and file_docs > 0:
+                size = dst_path.stat().st_size
+                bytes_ += size
+                files.append(
+                    {
+                        "file": dst_path.name,
+                        "source_file": src_path.name,
+                        "docs": file_docs,
+                        "chars": file_chars,
+                        "bytes": size,
+                    }
+                )
+            writer = None
+            dst_path = None
+            file_docs = 0
+            file_chars = 0
+            chunk_idx += 1
+
         try:
             for rg_idx in range(pf.num_row_groups):
                 if remaining == 0:
@@ -296,30 +422,52 @@ def _stage_train_inputs(train_paths: list[Path], staged_dir: Path, max_docs: int
                 texts = table.column("text").to_pylist()
                 if remaining is not None and len(texts) > remaining:
                     texts = texts[:remaining]
-                ids = [f"{src_path.name}:{row_offset + i}" for i in range(len(texts))]
-                row_offset += len(texts)
-                out = pa.table({"doc_id": ids, "text": texts})
-                if writer is None:
-                    writer = pq.ParquetWriter(dst_path, out.schema, compression="zstd")
-                writer.write_table(out, row_group_size=ROW_GROUP_SIZE)
-                batch_chars = sum(len(text or "") for text in texts)
-                docs += len(texts)
-                chars += batch_chars
-                file_docs += len(texts)
-                file_chars += batch_chars
-                if remaining is not None:
-                    remaining -= len(texts)
+
+                offset = 0
+                while offset < len(texts):
+                    if writer is None:
+                        dst_path = next_dst_path()
+                    chunk_remaining = None
+                    if staged_docs_per_file is not None:
+                        chunk_remaining = staged_docs_per_file - file_docs
+                        if chunk_remaining <= 0:
+                            close_writer()
+                            dst_path = next_dst_path()
+                            chunk_remaining = staged_docs_per_file
+
+                    take = len(texts) - offset
+                    if chunk_remaining is not None:
+                        take = min(take, chunk_remaining)
+                    batch_texts = texts[offset : offset + take]
+                    ids = [f"{src_path.name}:{row_offset + i}" for i in range(len(batch_texts))]
+                    row_offset += len(batch_texts)
+                    out = pa.table({"doc_id": ids, "text": batch_texts})
+                    if writer is None:
+                        writer = pq.ParquetWriter(dst_path, out.schema, compression="zstd")
+                    writer.write_table(out, row_group_size=ROW_GROUP_SIZE)
+
+                    batch_chars = sum(len(text or "") for text in batch_texts)
+                    docs += len(batch_texts)
+                    chars += batch_chars
+                    file_docs += len(batch_texts)
+                    file_chars += batch_chars
+                    offset += take
+                    if remaining is not None:
+                        remaining -= len(batch_texts)
+                    if staged_docs_per_file is not None and file_docs >= staged_docs_per_file:
+                        close_writer()
         finally:
-            if writer is not None:
-                writer.close()
-        if file_docs > 0:
-            size = dst_path.stat().st_size
-            bytes_ += size
-            files.append({"file": dst_path.name, "source_file": src_path.name, "docs": file_docs, "chars": file_chars, "bytes": size})
+            close_writer()
 
     if docs == 0:
         raise ValueError("Staging produced zero documents")
-    return {"docs": docs, "chars": chars, "bytes": bytes_, "files": files}
+    return {
+        "docs": docs,
+        "chars": chars,
+        "bytes": bytes_,
+        "files": files,
+        "staged_docs_per_file": staged_docs_per_file,
+    }
 
 
 def _patch_xenna_monitoring_for_optional_ray_state_api() -> None:
@@ -432,6 +580,145 @@ def _write_stats_cache(path: Path, stats: dict) -> None:
     path.write_text(json.dumps(stats, indent=2, sort_keys=True))
 
 
+def _merge_dicts(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _print_embedding_model_presets() -> None:
+    for preset_name, preset in EMBEDDING_MODEL_PRESETS.items():
+        aliases = ", ".join(preset.get("aliases", ())) or "-"
+        vllm_kwargs = json.dumps(preset.get("vllm_init_kwargs", {}), sort_keys=True)
+        print(f"{preset_name}: {preset['model_identifier']}")
+        print(f"  aliases: {aliases}")
+        print(f"  embedding_dim: {preset.get('embedding_dim') or '-'}")
+        print(f"  vllm_init_kwargs: {vllm_kwargs}")
+        if preset.get("runtime_blocker"):
+            print(f"  runtime_blocker: {preset['runtime_blocker']}")
+        print(f"  note: {preset.get('note', '')}")
+
+
+def _resolve_embedding_model_args(args: argparse.Namespace) -> None:
+    requested = args.model_identifier.strip()
+    if not requested:
+        raise ValueError("--model-identifier cannot be empty")
+
+    preset_name = _embedding_model_lookup().get(requested.lower())
+    preset = EMBEDDING_MODEL_PRESETS.get(preset_name) if preset_name else None
+    model_identifier = preset["model_identifier"] if preset else requested
+    preset_kwargs = preset.get("vllm_init_kwargs", {}) if preset else {}
+    user_kwargs = _load_json_object(
+        args.embedding_vllm_init_kwargs_json,
+        "--embedding-vllm-init-kwargs-json",
+    )
+    vllm_init_kwargs = _merge_dicts(preset_kwargs, user_kwargs)
+
+    if args.embedding_enforce_eager:
+        vllm_init_kwargs["enforce_eager"] = True
+    if args.embedding_attention_backend:
+        attention_config = vllm_init_kwargs.get("attention_config", {})
+        if not isinstance(attention_config, dict):
+            raise ValueError("embedding_vllm_init_kwargs_json.attention_config must be an object")
+        attention_config["backend"] = args.embedding_attention_backend
+        vllm_init_kwargs["attention_config"] = attention_config
+
+    args.requested_model_identifier = requested
+    args.embedding_model_preset = preset_name
+    args.embedding_model_runtime_blocker = preset.get("runtime_blocker", "") if preset else ""
+    args.model_identifier = model_identifier
+    if args.embedding_dim is None and preset and preset.get("embedding_dim") is not None:
+        args.embedding_dim = int(preset["embedding_dim"])
+    args.resolved_embedding_vllm_init_kwargs = vllm_init_kwargs
+
+
+def _validate_embedding_model_runtime(args: argparse.Namespace) -> None:
+    if args.allow_unsupported_embedding_model or not args.embedding_model_runtime_blocker:
+        return
+    raise RuntimeError(
+        f"Embedding model preset '{args.embedding_model_preset}' is not runnable with the current runtime. "
+        f"{args.embedding_model_runtime_blocker}"
+    )
+
+
+def _build_curator_kwargs(args: argparse.Namespace, staged_input_dir: Path, curator_output_dir: Path) -> dict:
+    kwargs = {
+        "input_path": str(staged_input_dir),
+        "output_path": str(curator_output_dir),
+        "cache_path": str(args.cache_dir / "curator_cache"),
+        "text_field": "text",
+        "id_field": "doc_id",
+        "model_identifier": args.model_identifier,
+        "n_clusters": args.n_clusters,
+        "eps": args.eps,
+        "distance_metric": args.distance_metric,
+        "which_to_keep": args.which_to_keep,
+        "pairwise_batch_size": args.pairwise_batch_size,
+        "perform_removal": True,
+    }
+    if args.embedding_dim is not None:
+        kwargs["embedding_dim"] = args.embedding_dim
+    if args.input_files_per_partition is not None:
+        kwargs["input_files_per_partition"] = args.input_files_per_partition
+    if args.embedding_max_chars is not None:
+        kwargs["embedding_max_chars"] = args.embedding_max_chars
+    if args.resolved_embedding_vllm_init_kwargs:
+        kwargs["embedding_vllm_init_kwargs"] = args.resolved_embedding_vllm_init_kwargs
+    if args.model_cache_dir:
+        kwargs["model_cache_dir"] = args.model_cache_dir
+    return kwargs
+
+
+def _print_curator_config_dry_run(args: argparse.Namespace) -> None:
+    staged_input_dir = args.cache_dir / "input_with_ids"
+    curator_output_dir = args.cache_dir / "curator_output"
+    payload = {
+        "requested_model_identifier": args.requested_model_identifier,
+        "embedding_model_preset": args.embedding_model_preset,
+        "embedding_model_runtime_blocker": args.embedding_model_runtime_blocker or None,
+        "resolved_model_identifier": args.model_identifier,
+        "resolved_embedding_dim": args.embedding_dim,
+        "resolved_embedding_vllm_init_kwargs": args.resolved_embedding_vllm_init_kwargs,
+        "kmeans_files_per_group": args.kmeans_files_per_group,
+        "curator_kwargs": _build_curator_kwargs(args, staged_input_dir, curator_output_dir),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _patch_curator_kmeans_parquet_grouping(max_files_per_group: int | None) -> None:
+    if max_files_per_group is None:
+        return
+    if max_files_per_group <= 0:
+        raise ValueError("--kmeans-files-per-group must be positive when set")
+
+    from nemo_curator.stages.deduplication.semantic import kmeans as kmeans_module
+    from nemo_curator.stages.deduplication.semantic import utils as semantic_utils
+
+    original = getattr(
+        kmeans_module.break_parquet_partition_into_groups,
+        "_nanochat_original_grouping",
+        kmeans_module.break_parquet_partition_into_groups,
+    )
+
+    def capped_break_parquet_partition_into_groups(files, embedding_dim=None, storage_options=None):
+        groups = original(files, embedding_dim=embedding_dim, storage_options=storage_options)
+        capped_groups = []
+        for group in groups:
+            for offset in range(0, len(group), max_files_per_group):
+                capped_groups.append(group[offset : offset + max_files_per_group])
+        return capped_groups
+
+    capped_break_parquet_partition_into_groups._nanochat_original_grouping = original
+    capped_break_parquet_partition_into_groups._nanochat_group_cap = max_files_per_group
+    kmeans_module.break_parquet_partition_into_groups = capped_break_parquet_partition_into_groups
+    semantic_utils.break_parquet_partition_into_groups = capped_break_parquet_partition_into_groups
+    print(f"Patched Curator k-means parquet grouping: max_files_per_group={max_files_per_group}")
+
+
 def _count_semantic_duplicates(tasks) -> int:
     total = 0
     for task in tasks or []:
@@ -509,6 +796,7 @@ def _run_curator_staged(args, workflow) -> dict:
     )
     semantic_workflow._setup_directories()
     semantic_workflow._log_configuration(pairwise_executor)
+    _patch_curator_kmeans_parquet_grouping(args.kmeans_files_per_group)
 
     kmeans_start = time.time()
     _preinit_local_ray(args, "kmeans")
@@ -558,39 +846,7 @@ def _run_curator(args, staged_input_dir: Path, curator_output_dir: Path) -> dict
             "uv pip install --extra-index-url https://pypi.nvidia.com 'nemo-curator[text_cuda12]'"
         ) from exc
 
-    kwargs = {
-        "input_path": str(staged_input_dir),
-        "output_path": str(curator_output_dir),
-        "cache_path": str(args.cache_dir / "curator_cache"),
-        "text_field": "text",
-        "id_field": "doc_id",
-        "model_identifier": args.model_identifier,
-        "n_clusters": args.n_clusters,
-        "eps": args.eps,
-        "distance_metric": args.distance_metric,
-        "which_to_keep": args.which_to_keep,
-        "pairwise_batch_size": args.pairwise_batch_size,
-        "perform_removal": True,
-    }
-    if args.embedding_max_chars is not None:
-        kwargs["embedding_max_chars"] = args.embedding_max_chars
-    vllm_init_kwargs = _load_json_object(
-        args.embedding_vllm_init_kwargs_json,
-        "--embedding-vllm-init-kwargs-json",
-    )
-    if args.embedding_enforce_eager:
-        vllm_init_kwargs["enforce_eager"] = True
-    if args.embedding_attention_backend:
-        attention_config = vllm_init_kwargs.get("attention_config", {})
-        if not isinstance(attention_config, dict):
-            raise ValueError("embedding_vllm_init_kwargs_json.attention_config must be an object")
-        attention_config["backend"] = args.embedding_attention_backend
-        vllm_init_kwargs["attention_config"] = attention_config
-    if vllm_init_kwargs:
-        kwargs["embedding_vllm_init_kwargs"] = vllm_init_kwargs
-    if args.model_cache_dir:
-        kwargs["model_cache_dir"] = args.model_cache_dir
-
+    kwargs = _build_curator_kwargs(args, staged_input_dir, curator_output_dir)
     workflow = TextSemanticDeduplicationWorkflow(**kwargs)
     return _run_curator_staged(args, workflow)
 
@@ -763,8 +1019,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-output-dir", type=Path, default=None, help="Directory for SemDeDup audit artifacts and an extra manifest copy")
     parser.add_argument("--num-train-shards", type=int, default=8, help="Number of train shards to process; -1 means all available train shards")
     parser.add_argument("--max-docs", type=int, default=-1, help="Optional cap for smoke/pilot runs; -1 means no cap")
+    parser.add_argument(
+        "--staged-docs-per-file",
+        type=int,
+        default=None,
+        help="Optional cap for docs per staged parquet file before Curator file partitioning",
+    )
     parser.add_argument("--backend", choices=["curator", "exact-smoke"], default="curator")
-    parser.add_argument("--model-identifier", type=str, default="google/embeddinggemma-300m")
+    parser.add_argument("--model-identifier", type=str, default=DEFAULT_EMBEDDING_MODEL, help="Embedding model id or supported preset alias")
     parser.add_argument("--model-cache-dir", type=str, default="")
     parser.add_argument("--embedding-max-chars", type=int, default=None)
     parser.add_argument(
@@ -784,11 +1046,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Pass enforce_eager=True to vLLM embedding initialization",
     )
+    parser.add_argument("--embedding-dim", type=int, default=None, help="Embedding dimension hint used by Curator for k-means parquet grouping")
+    parser.add_argument(
+        "--kmeans-files-per-group",
+        type=int,
+        default=None,
+        help="Optional hard cap on parquet files read together by each Curator k-means subgroup",
+    )
     parser.add_argument("--n-clusters", type=int, default=100)
     parser.add_argument("--eps", type=float, default=0.07)
     parser.add_argument("--distance-metric", choices=["cosine", "l2"], default="cosine")
     parser.add_argument("--which-to-keep", choices=["hard", "easy", "random"], default="hard")
     parser.add_argument("--pairwise-batch-size", type=int, default=1024)
+    parser.add_argument(
+        "--input-files-per-partition",
+        type=int,
+        default=None,
+        help="Number of staged parquet files per Curator input partition",
+    )
     parser.add_argument("--audit-sample-size", type=int, default=100, help="Number of kept/removed docs to sample for manual inspection")
     parser.add_argument("--audit-seed", type=int, default=1337, help="Seed for deterministic audit samples")
     parser.add_argument("--tokenizer-batch-size", type=int, default=128)
@@ -808,7 +1083,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-stats-cache", type=Path, default=None, help="Optional staged input stats JSON cache")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--list-embedding-model-presets", action="store_true", help="List built-in embedding model presets and exit")
+    parser.add_argument("--dry-run-curator-config", action="store_true", help="Print resolved Curator kwargs and exit before reading data or importing Curator")
+    parser.add_argument(
+        "--allow-unsupported-embedding-model",
+        action="store_true",
+        help="Bypass preset runtime blockers and pass the resolved model args to Curator anyway",
+    )
     args = parser.parse_args()
+
+    if args.list_embedding_model_presets:
+        _print_embedding_model_presets()
+        raise SystemExit(0)
+    _resolve_embedding_model_args(args)
 
     if args.output_data_dir is None:
         args.output_data_dir = base_dir / f"base_data_{dataset_tag}_semdedup_eps{_eps_slug(args.eps)}_n{args.num_train_shards}"
@@ -830,6 +1117,13 @@ def main() -> None:
     args.cache_dir = args.cache_dir.expanduser().resolve()
     args.analysis_output_dir = args.analysis_output_dir.expanduser().resolve()
     args.input_stats_cache = args.input_stats_cache.expanduser().resolve()
+
+    if args.dry_run_curator_config:
+        _print_curator_config_dry_run(args)
+        return
+
+    _validate_embedding_model_runtime(args)
+
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     args.analysis_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -853,7 +1147,7 @@ def main() -> None:
         staged_paths = _parquet_files(staged_input_dir)
         if not staged_paths:
             raise FileNotFoundError(f"Cannot reuse staged inputs; no parquet files found in {staged_input_dir}")
-        source_files = _source_files_from_staged_paths(staged_paths)
+        source_files = _ordered_unique(_source_files_from_staged_paths(staged_paths))
         input_stats = _load_stats_cache(args.input_stats_cache)
         if input_stats is None:
             input_stats = _count_texts(staged_paths, tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
@@ -861,11 +1155,19 @@ def main() -> None:
         print(f"Reusing staged inputs from {staged_input_dir}")
         print(f"Loaded staged input stats cache: {args.input_stats_cache}")
     else:
-        input_stats = _stage_train_inputs(train_paths, staged_input_dir, args.max_docs, overwrite=args.overwrite)
-        source_files = [entry["source_file"] for entry in input_stats.get("files", [])]
+        input_stats = _stage_train_inputs(
+            train_paths,
+            staged_input_dir,
+            args.max_docs,
+            overwrite=args.overwrite,
+            staged_docs_per_file=args.staged_docs_per_file,
+        )
+        source_files = _ordered_unique([entry["source_file"] for entry in input_stats.get("files", [])])
         staged_paths = _parquet_files(staged_input_dir)
         if tokenizer is not None:
             input_stats = _count_texts(staged_paths, tokenizer, args.tokenizer_batch_size, args.tokenizer_threads)
+            input_stats["staged_docs_per_file"] = args.staged_docs_per_file
+            input_stats["staged_file_count"] = len(staged_paths)
         _write_stats_cache(args.input_stats_cache, input_stats)
     print(f"Staged {input_stats['docs']:,} docs / {input_stats['chars']:,} chars")
     if tokenizer is not None and "tokens" in input_stats:
@@ -922,15 +1224,22 @@ def main() -> None:
         "train_files": [p.name for p in train_paths],
         "val_file": val_path.name,
         "curator_config": {
+            "requested_model_identifier": args.requested_model_identifier,
             "model_identifier": args.model_identifier,
+            "embedding_model_preset": args.embedding_model_preset,
+            "embedding_model_runtime_blocker": args.embedding_model_runtime_blocker or None,
             "n_clusters": args.n_clusters,
             "eps": args.eps,
             "distance_metric": args.distance_metric,
             "which_to_keep": args.which_to_keep,
             "pairwise_batch_size": args.pairwise_batch_size,
+            "embedding_dim": args.embedding_dim,
             "embedding_max_chars": args.embedding_max_chars,
+            "input_files_per_partition": args.input_files_per_partition,
+            "kmeans_files_per_group": args.kmeans_files_per_group,
             "embedding_attention_backend": args.embedding_attention_backend or None,
             "embedding_enforce_eager": args.embedding_enforce_eager,
+            "embedding_vllm_init_kwargs": args.resolved_embedding_vllm_init_kwargs or None,
             "embedding_vllm_init_kwargs_json": args.embedding_vllm_init_kwargs_json or None,
         },
         "token_stats": {

@@ -1,0 +1,110 @@
+{
+  "baseline_runs": [
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/full-n170-r9p5-eps0p07-20260622T192524Z_baseline",
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/repeat-20260624T000845Z-seed43-n170-r9p5-eps0p07_baseline",
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/repeat-20260624T000845Z-seed44-n170-r9p5-eps0p07_baseline"
+  ],
+  "completed_qwen_pair_count": 3,
+  "ecdf_svg": "/home/nfs/hfang/curator_eval/nanochat/reports/semdedup_quality/fineweb_edu/qwen3_semdedup_similarity_ecdf.svg",
+  "embeddinggemma_comparison": {
+    "metrics": {
+      "base eval val BPB": {
+        "embeddinggemma_delta_mean": -0.0004983333333332673,
+        "qwen_delta_mean": -0.00026999999999999247,
+        "qwen_minus_embeddinggemma_mean": 0.00022833333333327488
+      },
+      "final CORE": {
+        "embeddinggemma_delta_mean": 0.0031000000000000008,
+        "qwen_delta_mean": 0.0031000000000000103,
+        "qwen_minus_embeddinggemma_mean": 9.25185853854297e-18
+      },
+      "final train val BPB": {
+        "embeddinggemma_delta_mean": -0.0006243333333333378,
+        "qwen_delta_mean": -0.00035033333333330435,
+        "qwen_minus_embeddinggemma_mean": 0.0002740000000000335
+      },
+      "min val BPB": {
+        "embeddinggemma_delta_mean": -0.0006243333333333378,
+        "qwen_delta_mean": -0.00035033333333330435,
+        "qwen_minus_embeddinggemma_mean": 0.0002740000000000335
+      }
+    },
+    "shared_seeds": [
+      "42",
+      "43",
+      "44"
+    ]
+  },
+  "embeddinggemma_runs": [
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/full-n170-r9p5-eps0p07-20260622T192524Z_semdedup",
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/repeat-20260624T000845Z-seed43-n170-r9p5-eps0p07_semdedup",
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_semdedup_quality/repeat-20260624T000845Z-seed44-n170-r9p5-eps0p07_semdedup"
+  ],
+  "output": "/home/nfs/hfang/curator_eval/nanochat/reports/semdedup_quality/fineweb_edu/qwen3_final_report.md",
+  "qwen_aggregate": {
+    "base eval val BPB": {
+      "baseline_mean": 0.750794,
+      "candidate_mean": 0.750524,
+      "delta_mean": -0.00026999999999999247,
+      "delta_std": 0.00013747727084866733
+    },
+    "final CORE": {
+      "baseline_mean": 0.24306666666666668,
+      "candidate_mean": 0.24616666666666667,
+      "delta_mean": 0.0031000000000000103,
+      "delta_std": 0.0076393717019137145
+    },
+    "final train val BPB": {
+      "baseline_mean": 0.7514683333333334,
+      "candidate_mean": 0.7511180000000001,
+      "delta_mean": -0.00035033333333330435,
+      "delta_std": 0.0001512756865240888
+    },
+    "min val BPB": {
+      "baseline_mean": 0.7514683333333334,
+      "candidate_mean": 0.7511180000000001,
+      "delta_mean": -0.00035033333333330435,
+      "delta_std": 0.0001512756865240888
+    },
+    "runtime sec to paired baseline BPB": {
+      "baseline_mean": 5822.8,
+      "candidate_mean": 5156.599999999999,
+      "delta_mean": -666.2000000000007,
+      "delta_std": 444.7130760389226
+    },
+    "steps to paired baseline BPB": {
+      "baseline_mean": 6612.0,
+      "candidate_mean": 6612.0,
+      "delta_mean": 0.0,
+      "delta_std": 0.0
+    },
+    "train iterations": {
+      "baseline_mean": 6612.0,
+      "candidate_mean": 6612.0,
+      "delta_mean": 0.0,
+      "delta_std": 0.0
+    },
+    "train runtime sec": {
+      "baseline_mean": 5822.8,
+      "candidate_mean": 5156.599999999999,
+      "delta_mean": -666.2000000000007,
+      "delta_std": 444.7130760389226
+    },
+    "train tokens": {
+      "baseline_mean": 6933184512.0,
+      "candidate_mean": 6933184512.0,
+      "delta_mean": 0.0,
+      "delta_std": 0.0
+    }
+  },
+  "qwen_runs": [
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_qwen3_semdedup_quality/qwen3-n170-r9p5-eps0p07-safe512-max16k-20260709T185702Z-seed42_semdedup",
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_qwen3_semdedup_quality/qwen3-n170-r9p5-eps0p07-safe512-max16k-20260709T185702Z-seed43_semdedup",
+    "/home/nfs/hfang/.cache/nanochat_b200_fineweb_edu/experiments/fineweb_edu_qwen3_semdedup_quality/qwen3-n170-r9p5-eps0p07-safe512-max16k-20260709T185702Z-seed44_semdedup"
+  ],
+  "qwen_seeds": [
+    "42",
+    "43",
+    "44"
+  ]
+}
