@@ -1,12 +1,31 @@
 # FineWeb-EDU Qwen3-Embedding-8B SemDeDup Final Report
 
-Generated: 2026-07-10 21:34:04 UTC
+Generated: 2026-07-13 19:56:21 UTC
 
 ## Executive Summary
 
 Qwen3 vs baseline: completed paired seeds 42, 43, 44; final train-val BPB delta -0.000350 +/- 0.000151, final CORE delta 0.003100 +/- 0.007639.
 
 Qwen3 vs previous EmbeddingGemma: Qwen3-minus-EmbeddingGemma final train-val BPB mean 0.000274; Qwen3-minus-EmbeddingGemma final CORE mean 0.000000.
+
+## Conclusion And Insights
+
+The main conclusion is that changing the SemDeDup embedding model from EmbeddingGemma to Qwen3 changes which documents are removed, but does not produce a clear downstream quality win at the fixed `eps=0.07` threshold.
+
+| Signal | Qwen3 | EmbeddingGemma | Qwen3 minus EmbeddingGemma |
+|---|---:|---:|---:|
+| Final train-val BPB delta vs baseline | -0.000350 +/- 0.000151 | -0.000624 +/- 0.000260 | +0.000274 +/- 0.000386 |
+| Final CORE delta vs baseline | +0.003100 +/- 0.007639 | +0.003100 +/- 0.005856 | +0.000000 +/- 0.002464 |
+| Removed docs | 670,984 | 633,070 | +37,914 |
+| Removed tokens | 735,555,484 | 775,605,001 | -40,049,517 |
+| Doc keep ratio | 0.925943 | 0.930127 | -0.004185 |
+| Token keep ratio | 0.920993 | 0.916691 | +0.004302 |
+
+- Qwen3 remains better than the no-SemDeDup baseline on BPB and has a small positive mean CORE delta, so the Qwen3 run does not invalidate the earlier FineWeb-EDU SemDeDup result.
+- Compared with EmbeddingGemma, Qwen3 is effectively tied on CORE and slightly worse on BPB at this exact threshold; the differences are small relative to seed variance.
+- The selection profile is different: Qwen3 removes more documents but fewer tokens than EmbeddingGemma. This suggests Qwen3 is pruning more short duplicate-like documents, while EmbeddingGemma removes fewer but longer documents.
+- The best next experiment is an eps/threshold calibration sweep for Qwen3. A fixed `eps=0.07` is not guaranteed to represent the same removal budget across embedding spaces.
+- Recommended next step: run a seed-42 Qwen3 sweep around `eps=0.05/0.07/0.09`, include ECDF and data-reduction stats, then promote one calibrated threshold to a 3-seed run. Add a random-drop control matched on removed tokens/docs for the selected threshold before making a stronger quality claim.
 
 ## Dataset And Setup
 

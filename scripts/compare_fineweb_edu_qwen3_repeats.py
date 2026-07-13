@@ -693,6 +693,96 @@ def _summary_text(qwen_pairs: list[dict[str, Any]], old_pairs: list[dict[str, An
     return qwen_line + "\n\n" + old_line
 
 
+def _render_conclusion_and_next_steps(
+    qwen_records: list[dict[str, Any]],
+    old_records: list[dict[str, Any]],
+    qwen_pairs: list[dict[str, Any]],
+    old_pairs: list[dict[str, Any]],
+) -> str:
+    if not qwen_pairs:
+        return "The Qwen3 run set is incomplete, so conclusions and next steps are deferred.\n"
+
+    def signed_pm(values: list[float]) -> str:
+        mean, std = _mean_std(values)
+        if mean is None:
+            return "-"
+        return f"{mean:+.6f} +/- {(std or 0.0):.6f}"
+
+    def candidate_diff(path: str) -> list[float]:
+        qwen_by_seed = {pair["seed"]: pair for pair in qwen_pairs}
+        old_by_seed = {pair["seed"]: pair for pair in old_pairs}
+        diffs = []
+        for seed in sorted(set(qwen_by_seed) & set(old_by_seed), key=_sort_seed):
+            qwen_value = _numeric(_get(qwen_by_seed[seed]["candidate"]["run_summary"], path))
+            old_value = _numeric(_get(old_by_seed[seed]["candidate"]["run_summary"], path))
+            if qwen_value is not None and old_value is not None:
+                diffs.append(qwen_value - old_value)
+        return diffs
+
+    qwen_bpb_deltas = [_metric_delta(pair, "metrics.final_train_val_bpb") for pair in qwen_pairs]
+    qwen_core_deltas = [_metric_delta(pair, "metrics.final_core") for pair in qwen_pairs]
+    old_bpb_deltas = [_metric_delta(pair, "metrics.final_train_val_bpb") for pair in old_pairs]
+    old_core_deltas = [_metric_delta(pair, "metrics.final_core") for pair in old_pairs]
+
+    qwen = _pick_reduction_record(qwen_records) or {}
+    old = _pick_reduction_record(old_records) or {}
+    qwen_manifest = qwen.get("manifest", {})
+    old_manifest = old.get("manifest", {})
+
+    def reduction_row(label: str, dotted: str) -> list[str]:
+        qwen_value = _get(qwen_manifest, dotted)
+        old_value = _get(old_manifest, dotted)
+        qwen_num = _numeric(qwen_value)
+        old_num = _numeric(old_value)
+        if qwen_num is None or old_num is None:
+            delta = "-"
+        elif abs(qwen_num) >= 1000 or abs(old_num) >= 1000:
+            delta = f"{qwen_num - old_num:+,.0f}"
+        else:
+            delta = f"{qwen_num - old_num:+.6f}"
+        return [label, _fmt(qwen_value), _fmt(old_value), delta]
+
+    rows = [
+        [
+            "Final train-val BPB delta vs baseline",
+            signed_pm([d for d in qwen_bpb_deltas if d is not None]),
+            signed_pm([d for d in old_bpb_deltas if d is not None]),
+            signed_pm(candidate_diff("metrics.final_train_val_bpb")),
+        ],
+        [
+            "Final CORE delta vs baseline",
+            signed_pm([d for d in qwen_core_deltas if d is not None]),
+            signed_pm([d for d in old_core_deltas if d is not None]),
+            signed_pm(candidate_diff("metrics.final_core")),
+        ],
+        reduction_row("Removed docs", "removed_docs"),
+        reduction_row("Removed tokens", "removed_tokens"),
+        reduction_row("Doc keep ratio", "keep_ratio_docs"),
+        reduction_row("Token keep ratio", "keep_ratio_tokens"),
+    ]
+
+    parts = [
+        (
+            "The main conclusion is that changing the SemDeDup embedding model from "
+            "EmbeddingGemma to Qwen3 changes which documents are removed, but does not "
+            "produce a clear downstream quality win at the fixed `eps=0.07` threshold."
+        ),
+        "",
+        _render_table(
+            ["Signal", "Qwen3", "EmbeddingGemma", "Qwen3 minus EmbeddingGemma"],
+            rows,
+            ["---", "---:", "---:", "---:"],
+        ),
+        "",
+        "- Qwen3 remains better than the no-SemDeDup baseline on BPB and has a small positive mean CORE delta, so the Qwen3 run does not invalidate the earlier FineWeb-EDU SemDeDup result.",
+        "- Compared with EmbeddingGemma, Qwen3 is effectively tied on CORE and slightly worse on BPB at this exact threshold; the differences are small relative to seed variance.",
+        "- The selection profile is different: Qwen3 removes more documents but fewer tokens than EmbeddingGemma. This suggests Qwen3 is pruning more short duplicate-like documents, while EmbeddingGemma removes fewer but longer documents.",
+        "- The best next experiment is an eps/threshold calibration sweep for Qwen3. A fixed `eps=0.07` is not guaranteed to represent the same removal budget across embedding spaces.",
+        "- Recommended next step: run a seed-42 Qwen3 sweep around `eps=0.05/0.07/0.09`, include ECDF and data-reduction stats, then promote one calibrated threshold to a 3-seed run. Add a random-drop control matched on removed tokens/docs for the selected threshold before making a stronger quality claim.",
+    ]
+    return "\n".join(parts)
+
+
 def _validate_required(args: argparse.Namespace, records: list[dict[str, Any]], qwen_pairs: list[dict[str, Any]]) -> None:
     if not args.require_complete:
         return
@@ -755,6 +845,10 @@ def main() -> None:
         "## Executive Summary",
         "",
         _summary_text(qwen_pairs, old_pairs),
+        "",
+        "## Conclusion And Insights",
+        "",
+        _render_conclusion_and_next_steps(qwen_records, old_records, qwen_pairs, old_pairs),
         "",
         "## Dataset And Setup",
         "",
