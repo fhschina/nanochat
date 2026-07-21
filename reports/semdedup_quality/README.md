@@ -1,18 +1,20 @@
-# SemDeDup Quality Experiments
+# Dedup Quality Experiments
 
-This directory keeps repo-level SemDeDup experiment documentation and final reports organized by dataset. Raw run outputs still live under each `$NANOCHAT_BASE_DIR/experiments/...` directory.
+This directory keeps repo-level deduplication experiment documentation and final reports organized by dataset. Raw corpora, caches, and full run outputs remain outside the repository.
 
 ## Datasets
 
 - `climbmix/`: ClimbMix canonical final report, runbook, branch report, task-delta analysis, commonsense QA follow-up, consolidated historical report, and ECDF artifacts.
 - `fineweb_edu/`: FineWeb-EDU canonical final report, runbook, multi-seed repeat report, and ECDF artifacts.
+- `fineweb_edu_fortified/`: FineWeb-EDU-Fortified exact/fuzzy dedup results, reproducibility entrypoints, and fuzzy-component audit artifacts.
 
-Use `climbmix/final_report.md` and `fineweb_edu/final_report.md` as the main side-by-side reports. The other Markdown files are supporting detail.
+Each dataset directory is the entrypoint for its reports and supporting artifacts.
 
 ## Entrypoints
 
 - `runs/climbmix_semdedup_quality_b200.sh`: ClimbMix wrapper.
 - `runs/fineweb_edu_semdedup_quality_b200.sh`: FineWeb-EDU wrapper.
+- `runs/fineweb_edu_fortified_exact_fuzzy_b200.sh`: FineWeb-EDU-Fortified materialization and exact/fuzzy dedup wrapper.
 - `runs/semdedup_quality_b200.sh`: shared baseline/SemDeDup/random-drop runner used by dataset wrappers.
 
 ## Shared Helpers
