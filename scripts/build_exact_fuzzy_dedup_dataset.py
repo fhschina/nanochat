@@ -826,8 +826,6 @@ def _render_report(args: argparse.Namespace, manifest: dict) -> str:
         [
             "# FineWeb-EDU-Fortified exact + fuzzy dedup report",
             "",
-            f"Generated: {manifest.get('completed_at') or _utc_now()}",
-            "",
             "## Experiment overview",
             "",
             "This experiment measures how much residual redundancy remains in the complete "

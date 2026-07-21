@@ -1,7 +1,5 @@
 # FineWeb-EDU-Fortified exact + fuzzy dedup report
 
-Generated: 2026-07-16T10:08:36.363718+00:00
-
 ## Experiment overview
 
 This experiment measures how much residual redundancy remains in the complete FineWeb-EDU-Fortified corpus after applying exact deduplication followed by MinHash-LSH fuzzy deduplication. The exact stage is retained as a residual check because the published corpus already applied global MD5 deduplication; the fuzzy stage targets near-duplicate documents that differ in formatting, boilerplate, or small text edits.
