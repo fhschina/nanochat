@@ -815,6 +815,10 @@ def _render_report(args: argparse.Namespace, manifest: dict) -> str:
         )
 
     config = manifest["config"]
+    num_bands = int(config["num_bands"])
+    minhashes_per_band = int(config["minhashes_per_band"])
+    total_minhashes = num_bands * minhashes_per_band
+    candidate_midpoint = (1.0 - 0.5 ** (1.0 / num_bands)) ** (1.0 / minhashes_per_band)
     exact_removed = int(raw["docs"]) - int(exact["docs"])
     fuzzy_removed = int(exact["docs"]) - int(fuzzy["docs"])
     total_removed = int(raw["docs"]) - int(fuzzy["docs"])
@@ -823,6 +827,29 @@ def _render_report(args: argparse.Namespace, manifest: dict) -> str:
             "# FineWeb-EDU-Fortified exact + fuzzy dedup report",
             "",
             f"Generated: {manifest.get('completed_at') or _utc_now()}",
+            "",
+            "## Experiment overview",
+            "",
+            "This experiment measures how much residual redundancy remains in the complete "
+            "FineWeb-EDU-Fortified corpus after applying exact deduplication followed by MinHash-LSH fuzzy "
+            "deduplication. The exact stage is retained as a residual check because the published corpus already "
+            "applied global MD5 deduplication; the fuzzy stage targets near-duplicate documents that differ in "
+            "formatting, boilerplate, or small text edits.",
+            "",
+            f"For fuzzy matching, each document is represented by `{config['char_ngrams']}`-character n-grams and "
+            f"summarized by `{total_minhashes}` `{64 if config['use_64_bit_hash'] else 32}`-bit MinHashes generated "
+            f"with seed `{config['seed']}`. The signature is divided into `{num_bands}` LSH bands with "
+            f"`{minhashes_per_band}` hashes per band. Under the standard MinHash independence approximation, this "
+            f"banding curve gives an individual pair a 50% candidate probability at character-ngram Jaccard "
+            f"similarity approximately `{candidate_midpoint:.4f}`. This is a probabilistic candidate boundary, not "
+            "a hard Jaccard threshold.",
+            "",
+            "Candidate relationships are merged into connected components, and one document is retained from each "
+            "component. Because connected components are transitive, a removed document can have lower direct "
+            "Jaccard similarity to the retained component representative than the pairwise LSH operating point. "
+            f"Processing `{config['bands_per_iteration']}` bands per iteration only bounds execution resources; it "
+            f"does not change the `{num_bands}`-band matching configuration. Input block size, removal worker count, "
+            "and removal batch size are throughput settings rather than similarity parameters.",
             "",
             "## Result",
             "",
@@ -858,9 +885,9 @@ def _render_report(args: argparse.Namespace, manifest: dict) -> str:
             f"- Removal record-batch size: `{config['removal_batch_size']:,}` rows",
             f"- Fuzzy seed: `{config['seed']}`",
             f"- Character n-grams: `{config['char_ngrams']}`",
-            f"- LSH bands: `{config['num_bands']}`",
-            f"- MinHashes per band: `{config['minhashes_per_band']}`",
-            f"- Total MinHashes: `{config['num_bands'] * config['minhashes_per_band']}`",
+            f"- LSH bands: `{num_bands}`",
+            f"- MinHashes per band: `{minhashes_per_band}`",
+            f"- Total MinHashes: `{total_minhashes}`",
             f"- Hash width: `{'64' if config['use_64_bit_hash'] else '32'}-bit`",
             f"- Bands per iteration: `{config['bands_per_iteration']}`",
             "- Retention policy: one document per Curator connected component",

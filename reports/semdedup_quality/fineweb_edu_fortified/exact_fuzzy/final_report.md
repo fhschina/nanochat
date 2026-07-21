@@ -2,6 +2,14 @@
 
 Generated: 2026-07-16T10:08:36.363718+00:00
 
+## Experiment overview
+
+This experiment measures how much residual redundancy remains in the complete FineWeb-EDU-Fortified corpus after applying exact deduplication followed by MinHash-LSH fuzzy deduplication. The exact stage is retained as a residual check because the published corpus already applied global MD5 deduplication; the fuzzy stage targets near-duplicate documents that differ in formatting, boilerplate, or small text edits.
+
+For fuzzy matching, each document is represented by `24`-character n-grams and summarized by `260` `32`-bit MinHashes generated with seed `42`. The signature is divided into `20` LSH bands with `13` hashes per band. Under the standard MinHash independence approximation, this banding curve gives an individual pair a 50% candidate probability at character-ngram Jaccard similarity approximately `0.7711`. This is a probabilistic candidate boundary, not a hard Jaccard threshold.
+
+Candidate relationships are merged into connected components, and one document is retained from each component. Because connected components are transitive, a removed document can have lower direct Jaccard similarity to the retained component representative than the pairwise LSH operating point. Processing `5` bands per iteration only bounds execution resources; it does not change the `20`-band matching configuration. Input block size, removal worker count, and removal batch size are throughput settings rather than similarity parameters.
+
 ## Result
 
 | Stage | Rows | Rows kept | HF tokens | HF tokens kept | NanoChat tokens (+BOS/row) | NanoChat tokens kept | Characters |
