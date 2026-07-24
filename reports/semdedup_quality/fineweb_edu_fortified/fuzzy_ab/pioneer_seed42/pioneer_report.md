@@ -13,6 +13,69 @@ Independent final validation BPB: **0.758163**.
 Final full CORE: **0.2404**.
 Optimization wall time: **6.77 hours**.
 
+## Experimental setup
+
+### Experiment question and pioneer scope
+
+The full experiment is a controlled, paired comparison between the existing FineWeb-EDU-Fortified fuzzy-deduplicated corpus and the corresponding raw corpus. This pioneer run covers only the fuzzy arm with model seed **42**. It is intended to validate the data, training, evaluation, and reporting pipeline before the paired raw results are available; by itself it cannot measure the effect of deduplication.
+
+### Training data and deterministic ordering
+
+- The fuzzy-deduplicated dataset already existed; fuzzy deduplication was not rerun for this experiment.
+- The training view is the stable-hash interval `[0, 0.08)`, selected with `xxh3_128(seed=20260722, subset + "\0" + doc_id)` and emitted as 512 ordered buckets. This makes document selection and ordering independent of source-file enumeration and worker count.
+- The selected view contains **16,364,080 documents** and **16,516,227,376 source tokens**, enough to complete the fixed training budget without an epoch rollover.
+- Exact matches to the shared validation set were excluded: **2,905 documents / 2,761,872 source tokens**.
+- Validation uses the fixed held-out FineWeb-EDU parquet shard recorded in the reproducibility section. The same validation data will be used for every fuzzy/raw seed.
+
+### What “NanoChat d24” means
+
+`d24` means a NanoChat Transformer with **24 layers**; it does not mean a 24-billion-parameter model. With NanoChat's default depth-to-width rule (`n_embd = depth × 64`), this run has width 1,536.
+
+| Model field | Value |
+|---|---|
+| Transformer layers | 24 |
+| Model width | 1,536 |
+| Attention heads / KV heads | 12 / 12 |
+| Head dimension | 128 |
+| Context length | 2,048 tokens |
+| Attention window pattern | `L` (full attention in every layer) |
+| Vocabulary size | 32,768 |
+| Total parameters | 1,384,122,122 |
+| Scaling parameters | 729,810,624 |
+
+NanoChat reports the training-token ratio against its scaling-parameter count (Transformer matrices plus the language-model head), rather than against all stored parameters. Therefore `6,933,184,512 / 729,810,624 = 9.50` tokens per scaling parameter.
+
+### Optimization and distributed execution
+
+| Training field | Value |
+|---|---|
+| Hardware | 8 × NVIDIA B200 |
+| Model seed | 42 |
+| Optimization steps | 6,612 |
+| Global target-token batch | 1,048,576 tokens |
+| Per-rank micro-batch | 16 sequences × 2,048 tokens |
+| Gradient accumulation | 4 micro-steps |
+| Total training tokens | 6,933,184,512 |
+| Numerics | BF16 compute; tensorwise FP8 linear training |
+| Optimizer | Muon for matrix parameters; AdamW for other parameters |
+| LR schedule | 40-step warmup, then linear warmdown over the final 65% to 5% of peak LR |
+| Checkpointing | Final checkpoint only; resumable model, optimizer, and data cursor state |
+
+The global batch and training budget follow directly from:
+
+`16 sequences/rank × 2,048 tokens × 8 ranks × 4 accumulation steps = 1,048,576 tokens/step`
+
+`1,048,576 tokens/step × 6,612 steps = 6,933,184,512 training tokens`
+
+FP8 was enabled for 145 of 158 linear layers; evaluation temporarily used non-FP8 linear layers. Flash Attention 3 was unavailable on this run, so attention used the PyTorch SDPA fallback.
+
+### Evaluation and experiment records
+
+- Validation BPB was measured at step 0, every 250 optimization steps, and at the final step, using 41,943,040 validation tokens per measurement.
+- Online CORE was measured every 1,000 steps with at most 500 examples per task and evaluation seed 1,337. The final CORE evaluation used the full available task sets (`max_per_task = -1`).
+- W&B ran in offline mode. The run also saved local logs, structured JSON/CSV results, checksums, plots, and the final model checkpoint.
+- The full study repeats this configuration for fuzzy seeds 42/43/44 and paired raw seeds 42/43/44. Only those paired results support conclusions about fuzzy deduplication.
+
 ## Run results
 
 | Arm | Seed | Steps | Training tokens | Final BPB | Eval BPB | Final CORE |
