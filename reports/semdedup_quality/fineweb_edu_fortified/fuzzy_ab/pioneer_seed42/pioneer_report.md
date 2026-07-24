@@ -27,9 +27,7 @@ The full experiment is a controlled, paired comparison between the existing Fine
 - Exact matches to the shared validation set were excluded: **2,905 documents / 2,761,872 source tokens**.
 - Validation uses the fixed held-out FineWeb-EDU parquet shard recorded in the reproducibility section. The same validation data will be used for every fuzzy/raw seed.
 
-### What “NanoChat d24” means
-
-`d24` means a NanoChat Transformer with **24 layers**; it does not mean a 24-billion-parameter model. With NanoChat's default depth-to-width rule (`n_embd = depth × 64`), this run has width 1,536.
+### Model configuration
 
 | Model field | Value |
 |---|---|
