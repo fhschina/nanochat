@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
-from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.dataloader import resolve_parquet_paths, tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanochat.megatron_dataloader import megatron_data_loader, megatron_data_loader_with_state, _load_weights_arg
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
@@ -82,11 +82,21 @@ parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 # Data source
 parser.add_argument("--data-source", type=str, default="parquet", choices=["parquet", "megatron"], help="parquet=nanochat default (text+tokenizer); megatron=pre-tokenized .bin/.idx files")
-parser.add_argument("--data-dir", type=str, default="", help="Data directory. For parquet: directory of nanochat-compatible .parquet shards. For megatron: directory containing .bin/.idx pairs.")
+parser.add_argument("--data-dir", type=str, default="", help="Legacy combined parquet data directory, or Megatron data directory")
+parser.add_argument("--train-data-dir", type=str, default="", help="Explicit parquet train directory; all parquet files are training files")
+parser.add_argument("--val-data-dir", type=str, default="", help="Explicit parquet validation directory or parquet file")
+parser.add_argument("--fail-on-data-epoch-rollover", action="store_true", help="Abort if the explicit training view reaches epoch 2")
 parser.add_argument("--domain-weights", type=str, default="proportional", help="(megatron only) sampling weights across domains: 'proportional' (default), 'uniform', a JSON file path, or an inline JSON dict/list")
 parser.add_argument("--train-fraction", type=float, default=0.99, help="(megatron only) fraction of each domain's docs used for training; the rest is held out as val")
 parser.add_argument("--pile-val-dir", type=str, default="", help="(megatron only) optional second val source (e.g. pretokenized Pile val); reports val/bpb_pile alongside val/bpb")
 args = parser.parse_args()
+explicit_parquet_data = bool(args.train_data_dir or args.val_data_dir)
+if bool(args.train_data_dir) != bool(args.val_data_dir):
+    parser.error("--train-data-dir and --val-data-dir must be supplied together")
+if explicit_parquet_data and args.data_dir:
+    parser.error("--train-data-dir/--val-data-dir are mutually exclusive with --data-dir")
+if explicit_parquet_data and args.data_source != "parquet":
+    parser.error("explicit train/val parquet paths require --data-source=parquet")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -339,11 +349,31 @@ if scaler is not None:
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
 build_pile_val_loader = None
 if args.data_source == "parquet":
-    parquet_data_dir = args.data_dir or None
-    if parquet_data_dir:
-        print0(f"Parquet data dir: {parquet_data_dir}")
-    train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, data_dir=parquet_data_dir)
-    build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device, data_dir=parquet_data_dir)
+    if explicit_parquet_data:
+        train_parquet_paths = resolve_parquet_paths(args.train_data_dir)
+        val_parquet_paths = resolve_parquet_paths(args.val_data_dir)
+        print0(f"Explicit parquet train files: {len(train_parquet_paths)} from {args.train_data_dir}")
+        print0(f"Explicit parquet val files: {len(val_parquet_paths)} from {args.val_data_dir}")
+        train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
+            tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device,
+            resume_state_dict=dataloader_resume_state_dict, parquet_paths=train_parquet_paths,
+        )
+        build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
+            tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device,
+            parquet_paths=val_parquet_paths,
+        )
+    else:
+        parquet_data_dir = args.data_dir or None
+        if parquet_data_dir:
+            print0(f"Parquet data dir: {parquet_data_dir}")
+        train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
+            tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device,
+            resume_state_dict=dataloader_resume_state_dict, data_dir=parquet_data_dir,
+        )
+        build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
+            tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device,
+            data_dir=parquet_data_dir,
+        )
 elif args.data_source == "megatron":
     if not args.data_dir:
         raise ValueError("--data-source=megatron requires --data-dir")
@@ -434,6 +464,7 @@ if not resuming:
     min_val_bpb = float("inf")
     smooth_train_loss = 0 # EMA of training loss
     total_training_time = 0 # total wall-clock time of training
+    consumed_data_stats = {"target_tokens": 0, "removed_target_tokens": 0, "has_removed_labels": False}
 else:
     step = meta_data["step"]
     loop_state = meta_data["loop_state"]
@@ -441,6 +472,7 @@ else:
     min_val_bpb = loop_state["min_val_bpb"]
     smooth_train_loss = loop_state["smooth_train_loss"]
     total_training_time = loop_state["total_training_time"]
+    consumed_data_stats = dict(loop_state.get("consumed_data_stats", {"target_tokens": 0, "removed_target_tokens": 0, "has_removed_labels": False}))
 
 # Figure out the needed gradient accumulation micro-steps to reach the desired total batch size per step
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
@@ -535,11 +567,12 @@ while True:
                 "device_batch_size": args.device_batch_size,
                 "max_seq_len": args.max_seq_len,
                 "total_batch_size": total_batch_size,
-                "dataloader_state_dict": dataloader_state_dict,
+                "dataloader_state_dict": dataloader_state_dict.get("resume_state_before_batch", dataloader_state_dict),
                 "loop_state": { # all loop state (other than step) so that we can resume training
                     "min_val_bpb": min_val_bpb,
                     "smooth_train_loss": smooth_train_loss,
                     "total_training_time": total_training_time,
+                    "consumed_data_stats": consumed_data_stats,
                 },
             },
             rank=ddp_rank,
@@ -555,6 +588,10 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        batch_stats = dataloader_state_dict.get("batch_stats", {})
+        consumed_data_stats["target_tokens"] += int(batch_stats.get("target_tokens", x.numel()))
+        consumed_data_stats["removed_target_tokens"] += int(batch_stats.get("removed_target_tokens", 0))
+        consumed_data_stats["has_removed_labels"] = bool(consumed_data_stats["has_removed_labels"] or batch_stats.get("has_removed_labels", False))
         loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
@@ -563,6 +600,8 @@ while True:
         else:
             loss.backward()
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        if explicit_parquet_data and args.fail_on_data_epoch_rollover and int(dataloader_state_dict.get("epoch", 1)) > 1:
+            raise RuntimeError("Explicit training view exhausted before the requested horizon (epoch rollover)")
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
@@ -632,6 +671,26 @@ while True:
             "train/mfu": mfu,
             "train/epoch": epoch,
         }
+        if consumed_data_stats.get("has_removed_labels"):
+            values = torch.tensor([
+                int(consumed_data_stats["target_tokens"]),
+                int(consumed_data_stats["removed_target_tokens"]),
+            ], dtype=torch.float64, device=device)
+            if is_ddp_initialized():
+                dist.all_reduce(values, op=dist.ReduceOp.SUM)
+            target_tokens_seen, removed_target_tokens_seen = values.tolist()
+            removed_fraction = removed_target_tokens_seen / target_tokens_seen if target_tokens_seen else 0.0
+            log_data.update({
+                "data/target_tokens": target_tokens_seen,
+                "data/removed_target_tokens": removed_target_tokens_seen,
+                "data/fuzzy_removed_target_fraction": removed_fraction,
+            })
+            print0("DATA_EXPOSURE " + json.dumps({
+                "step": step,
+                "target_tokens": int(target_tokens_seen),
+                "removed_target_tokens": int(removed_target_tokens_seen),
+                "fuzzy_removed_target_fraction": removed_fraction,
+            }, sort_keys=True))
         wandb_run.log(log_data)
 
     # state update
@@ -649,6 +708,36 @@ while True:
         gc.collect() # manually collect, just to be safe for very, very long runs
 
 # print a few more stats
+if consumed_data_stats.get("has_removed_labels"):
+    exposure_values = torch.tensor([
+        int(consumed_data_stats["target_tokens"]),
+        int(consumed_data_stats["removed_target_tokens"]),
+    ], dtype=torch.float64, device=device)
+    if is_ddp_initialized():
+        dist.all_reduce(exposure_values, op=dist.ReduceOp.SUM)
+    target_tokens_seen, removed_target_tokens_seen = exposure_values.tolist()
+    print0("FINAL_DATA_EXPOSURE " + json.dumps({
+        "target_tokens": int(target_tokens_seen),
+        "removed_target_tokens": int(removed_target_tokens_seen),
+        "fuzzy_removed_target_fraction": removed_target_tokens_seen / target_tokens_seen if target_tokens_seen else 0.0,
+    }, sort_keys=True))
+loader_stats = dataloader_state_dict.get("data_stats", {})
+if loader_stats:
+    loader_values = torch.tensor([
+        int(loader_stats.get(key, 0)) for key in (
+            "source_docs", "source_tokens", "removed_source_docs", "removed_source_tokens",
+            "target_tokens", "removed_target_tokens", "cropped_tokens", "removed_cropped_tokens",
+        )
+    ], dtype=torch.float64, device=device)
+    if is_ddp_initialized():
+        dist.all_reduce(loader_values, op=dist.ReduceOp.SUM)
+    loader_keys = (
+        "source_docs", "source_tokens", "removed_source_docs", "removed_source_tokens",
+        "target_tokens", "removed_target_tokens", "cropped_tokens", "removed_cropped_tokens",
+    )
+    print0("FINAL_DATA_LOADER_STATS " + json.dumps({
+        key: int(value) for key, value in zip(loader_keys, loader_values.tolist(), strict=True)
+    }, sort_keys=True))
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
 if val_bpb is not None:

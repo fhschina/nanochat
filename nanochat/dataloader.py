@@ -1,166 +1,272 @@
-"""
-Distributed dataloaders for pretraining.
+"""Distributed BOS-aligned best-fit parquet dataloaders."""
 
-BOS-aligned bestfit:
-   - Every row starts with BOS token
-   - Documents packed using best-fit algorithm to minimize cropping
-   - When no document fits remaining space, crops a document to fill exactly
-   - 100% utilization (no padding), ~35% tokens cropped at T=2048
+from __future__ import annotations
 
-Compared to the original tokenizing_distributed_data_loader:
-BOS-aligned loses ~35% of tokens to cropping, but ensures that
-there are fewer "confusing" tokens in the train/val batches as every token can
-now attend back to the BOS token and sees the full context of the document.
+from pathlib import Path
+from typing import Sequence
 
-Fallback to the original if you have very limited data AND long documents:
-https://github.com/karpathy/nanochat/blob/3c3a3d7/nanochat/dataloader.py#L78-L117
-"""
-
-import torch
 import pyarrow.parquet as pq
+import torch
 
 from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 
-def _document_batches(split, resume_state_dict, tokenizer_batch_size, data_dir=None):
-    """
-    Infinite iterator over document batches (list of text strings) from parquet files.
+STAT_KEYS = (
+    "source_docs",
+    "source_tokens",
+    "removed_source_docs",
+    "removed_source_tokens",
+    "target_tokens",
+    "removed_target_tokens",
+    "cropped_tokens",
+    "removed_cropped_tokens",
+)
 
-    Handles DDP sharding and approximate resume. Each yield is (text_batch, (pq_idx, rg_idx, epoch))
-    where text_batch is a list of document strings, indices track position for resumption,
-    and epoch counts how many times we've cycled through the dataset (starts at 1).
-    """
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
-    warn_on_legacy = ddp_rank == 0 and split == "train" and data_dir is None # rank 0 on train split will warn on legacy
-    parquet_paths = list_parquet_files(data_dir=data_dir, warn_on_legacy=warn_on_legacy)
-    assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+def resolve_parquet_paths(path: str | Path) -> list[str]:
+    """Resolve a parquet file or a flat parquet directory into sorted paths."""
+    source = Path(path).expanduser().resolve()
+    if source.is_file():
+        if source.suffix != ".parquet":
+            raise ValueError(f"Expected a parquet file, got: {source}")
+        return [str(source)]
+    if not source.is_dir():
+        raise FileNotFoundError(source)
+    paths = sorted(
+        str(item)
+        for item in source.iterdir()
+        if item.is_file() and item.suffix == ".parquet" and not item.name.endswith(".tmp")
+    )
+    if not paths:
+        raise FileNotFoundError(f"No parquet files found in {source}")
+    return paths
 
-    resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
-    resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
-    resume_epoch = resume_state_dict.get("epoch", 1) if resume_state_dict is not None else 1
-    first_pass = True
-    pq_idx = resume_pq_idx
-    epoch = resume_epoch
 
-    while True:  # iterate infinitely (multi-epoch)
-        pq_idx = resume_pq_idx if first_pass else 0
-        while pq_idx < len(parquet_paths):
-            filepath = parquet_paths[pq_idx]
-            pf = pq.ParquetFile(filepath)
-            # Start from resume point if resuming on same file, otherwise from DDP rank
-            if first_pass and (resume_rg_idx is not None) and (pq_idx == resume_pq_idx):
-                base_idx = resume_rg_idx // ddp_world_size
-                base_idx += 1  # advance by 1 so we don't repeat data after resuming
-                rg_idx = base_idx * ddp_world_size + ddp_rank
-                if rg_idx >= pf.num_row_groups:
-                    pq_idx += 1
-                    continue
-                resume_rg_idx = None  # only do this once
-            else:
-                rg_idx = ddp_rank
-            while rg_idx < pf.num_row_groups:
-                rg = pf.read_row_group(rg_idx)
-                batch = rg.column('text').to_pylist()
-                for i in range(0, len(batch), tokenizer_batch_size):
-                    yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx, epoch)
-                rg_idx += ddp_world_size
-            pq_idx += 1
-        first_pass = False
-        epoch += 1
+def _selected_parquet_paths(split, data_dir, parquet_paths, warn_on_legacy):
+    if parquet_paths is not None:
+        paths = [str(Path(path).expanduser().resolve()) for path in parquet_paths]
+        if not paths:
+            raise ValueError("parquet_paths must not be empty")
+        missing = [path for path in paths if not Path(path).is_file()]
+        if missing:
+            raise FileNotFoundError(missing[0])
+        return paths
+    paths = list_parquet_files(data_dir=data_dir, warn_on_legacy=warn_on_legacy)
+    if not paths:
+        raise FileNotFoundError("No dataset parquet files found, did you run dataset.py?")
+    return paths[:-1] if split == "train" else paths[-1:]
+
+
+def _document_batches(
+    split,
+    resume_state_dict,
+    tokenizer_batch_size,
+    data_dir=None,
+    parquet_paths: Sequence[str] | None = None,
+):
+    """Yield document records and an exact cursor after each source batch."""
+    if split not in {"train", "val"}:
+        raise ValueError("split must be 'train' or 'val'")
+    _, ddp_rank, _, ddp_world_size = get_dist_info()
+    warn = ddp_rank == 0 and split == "train" and data_dir is None and parquet_paths is None
+    paths = _selected_parquet_paths(split, data_dir, parquet_paths, warn)
+    source_state = (resume_state_dict or {}).get("source_state", resume_state_dict or {})
+    pq_idx = int(source_state.get("pq_idx", 0))
+    rg_idx = int(source_state.get("rg_idx", -1))
+    doc_offset = int(source_state.get("doc_offset", 0))
+    epoch = int(source_state.get("epoch", 1))
+
+    while True:
+        if pq_idx >= len(paths):
+            pq_idx, rg_idx, doc_offset, epoch = 0, -1, 0, epoch + 1
+        pf = pq.ParquetFile(paths[pq_idx])
+        if rg_idx < 0:
+            rg_idx = ddp_rank
+        if rg_idx >= pf.num_row_groups:
+            pq_idx, rg_idx, doc_offset = pq_idx + 1, -1, 0
+            continue
+
+        available = set(pf.schema_arrow.names)
+        columns = ["text"]
+        if "removed_by_fuzzy" in available:
+            columns.append("removed_by_fuzzy")
+        if "nanochat_token_count" in available:
+            columns.append("nanochat_token_count")
+        rows = pf.read_row_group(rg_idx, columns=columns).to_pydict()
+        texts = rows["text"]
+        removed = rows.get("removed_by_fuzzy")
+        declared_tokens = rows.get("nanochat_token_count")
+
+        while doc_offset < len(texts):
+            end = min(doc_offset + tokenizer_batch_size, len(texts))
+            records = [
+                {
+                    "text": texts[index],
+                    "removed_by_fuzzy": bool(removed[index]) if removed is not None else False,
+                    "has_removed_label": removed is not None,
+                    "declared_tokens": int(declared_tokens[index]) if declared_tokens is not None else None,
+                }
+                for index in range(doc_offset, end)
+            ]
+            next_pq, next_rg, next_offset, next_epoch = pq_idx, rg_idx, end, epoch
+            if next_offset >= len(texts):
+                next_offset, next_rg = 0, rg_idx + ddp_world_size
+                if next_rg >= pf.num_row_groups:
+                    next_pq, next_rg = pq_idx + 1, -1
+                    if next_pq >= len(paths):
+                        next_pq, next_epoch = 0, epoch + 1
+            next_state = {
+                "pq_idx": next_pq,
+                "rg_idx": next_rg,
+                "doc_offset": next_offset,
+                "epoch": next_epoch,
+            }
+            yield records, next_state
+            pq_idx, rg_idx = next_state["pq_idx"], next_state["rg_idx"]
+            doc_offset, epoch = next_state["doc_offset"], next_state["epoch"]
+            if doc_offset == 0:
+                break
 
 
 def tokenizing_distributed_data_loader_with_state_bos_bestfit(
-    tokenizer, B, T, split,
-    tokenizer_threads=4, tokenizer_batch_size=128,
-    device="cuda", resume_state_dict=None,
-    data_dir=None, buffer_size=1000
+    tokenizer,
+    B,
+    T,
+    split,
+    tokenizer_threads=4,
+    tokenizer_batch_size=128,
+    device="cuda",
+    resume_state_dict=None,
+    data_dir=None,
+    buffer_size=1000,
+    parquet_paths: Sequence[str] | None = None,
 ):
-    """
-    BOS-aligned dataloader with Best-Fit Cropping.
-
-    Reduces token waste compared to simple greedy cropping by searching a buffer
-    for documents that fit well, while maintaining 100% utilization (no padding).
-
-    Algorithm for each row:
-    1. From buffered docs, pick the LARGEST doc that fits entirely
-    2. Repeat until no doc fits
-    3. When nothing fits, crop a doc to fill remaining space exactly
-
-    Key properties:
-    - Every row starts with BOS
-    - 100% utilization (no padding, every token is trained on)
-    - Approximately 35% of all tokens are discarded due to cropping
-    """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
-
+    """Yield packed tensors plus an exact post-batch source/buffer state."""
+    if split not in {"train", "val"}:
+        raise ValueError("split must be 'train' or 'val'")
+    if buffer_size <= 0:
+        raise ValueError("buffer_size must be positive")
+    resume = resume_state_dict or {}
     row_capacity = T + 1
-    batches = _document_batches(split, resume_state_dict, tokenizer_batch_size, data_dir=data_dir)
+    batches = _document_batches(
+        split,
+        resume,
+        tokenizer_batch_size,
+        data_dir=data_dir,
+        parquet_paths=parquet_paths,
+    )
     bos_token = tokenizer.get_bos_token_id()
-    doc_buffer = []
-    pq_idx, rg_idx, epoch = 0, 0, 1
+    doc_buffer = [
+        (list(item["tokens"]), bool(item["removed_by_fuzzy"]))
+        for item in resume.get("doc_buffer", [])
+    ]
+    stats = {key: int(resume.get("data_stats", {}).get(key, 0)) for key in STAT_KEYS}
+    stats["has_removed_labels"] = bool(
+        resume.get("data_stats", {}).get("has_removed_labels", False)
+    )
+    source_state = dict(
+        resume.get(
+            "source_state",
+            {"pq_idx": 0, "rg_idx": -1, "doc_offset": 0, "epoch": 1},
+        )
+    )
 
     def refill_buffer():
-        nonlocal pq_idx, rg_idx, epoch
-        doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
-        token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-        for tokens in token_lists:
-            doc_buffer.append(tokens)
+        nonlocal source_state
+        records, source_state = next(batches)
+        token_lists = tokenizer.encode(
+            [record["text"] for record in records],
+            prepend=bos_token,
+            num_threads=tokenizer_threads,
+        )
+        for record, tokens in zip(records, token_lists, strict=True):
+            tokens = list(tokens)
+            removed = bool(record["removed_by_fuzzy"])
+            stats["has_removed_labels"] = bool(
+                stats["has_removed_labels"] or record["has_removed_label"]
+            )
+            stats["source_docs"] += 1
+            stats["source_tokens"] += len(tokens)
+            if removed:
+                stats["removed_source_docs"] += 1
+                stats["removed_source_tokens"] += len(tokens)
+            doc_buffer.append((tokens, removed))
 
-    # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
-    # This gives us contiguous views and a single HtoD transfer
-    use_cuda = device == "cuda"
-    row_buffer = torch.empty((B, row_capacity), dtype=torch.long) # for building rows without creating Python lists
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda) # staging area (CPU)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device) # on-device buffer
-    cpu_inputs = cpu_buffer[:B * T].view(B, T) # a few views into these buffers just for convenience
-    cpu_targets = cpu_buffer[B * T:].view(B, T)
-    inputs = gpu_buffer[:B * T].view(B, T)
-    targets = gpu_buffer[B * T:].view(B, T)
+    use_cuda = device == "cuda" or str(device).startswith("cuda:")
+    row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
+    origin_buffer = torch.empty((B, row_capacity), dtype=torch.bool)
+    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda)
+    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device)
+    cpu_inputs = cpu_buffer[: B * T].view(B, T)
+    cpu_targets = cpu_buffer[B * T :].view(B, T)
+    inputs = gpu_buffer[: B * T].view(B, T)
+    targets = gpu_buffer[B * T :].view(B, T)
 
     while True:
+        resume_state_before_batch = {
+            **source_state,
+            "source_state": dict(source_state),
+            "doc_buffer": [
+                {"tokens": tokens, "removed_by_fuzzy": removed}
+                for tokens, removed in doc_buffer
+            ],
+            "data_stats": dict(stats),
+        }
         for row_idx in range(B):
             pos = 0
             while pos < row_capacity:
-                # Ensure buffer has documents
                 while len(doc_buffer) < buffer_size:
                     refill_buffer()
-
                 remaining = row_capacity - pos
-
-                # Find largest doc that fits entirely
                 best_idx = -1
                 best_len = 0
-                for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
-                    if doc_len <= remaining and doc_len > best_len:
-                        best_idx = i
-                        best_len = doc_len
+                for index, (tokens, _) in enumerate(doc_buffer):
+                    if len(tokens) <= remaining and len(tokens) > best_len:
+                        best_idx = index
+                        best_len = len(tokens)
 
                 if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
-                    doc_len = len(doc)
-                    row_buffer[row_idx, pos:pos + doc_len] = torch.tensor(doc, dtype=torch.long)
-                    pos += doc_len
+                    tokens, removed = doc_buffer.pop(best_idx)
+                    used = len(tokens)
                 else:
-                    # No doc fits - crop shortest in buffer to fill remaining and minimize waste
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
-                    row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
-                    pos += remaining
+                    shortest_idx = min(
+                        range(len(doc_buffer)), key=lambda index: len(doc_buffer[index][0])
+                    )
+                    tokens, removed = doc_buffer.pop(shortest_idx)
+                    used = remaining
+                    cropped = len(tokens) - used
+                    stats["cropped_tokens"] += cropped
+                    if removed:
+                        stats["removed_cropped_tokens"] += cropped
+                row_buffer[row_idx, pos : pos + used] = torch.tensor(tokens[:used], dtype=torch.long)
+                origin_buffer[row_idx, pos : pos + used] = removed
+                pos += used
 
-        # Copy to pinned CPU buffer, then single HtoD transfer
         cpu_inputs.copy_(row_buffer[:, :-1])
         cpu_targets.copy_(row_buffer[:, 1:])
-
-        state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx, "epoch": epoch}
-
-        # Single HtoD copy into persistent GPU buffer and yield
+        batch_removed_targets = int(origin_buffer[:, 1:].sum().item())
+        stats["target_tokens"] += B * T
+        stats["removed_target_tokens"] += batch_removed_targets
+        state_dict = {
+            **source_state,
+            "source_state": dict(source_state),
+            "doc_buffer": [
+                {"tokens": tokens, "removed_by_fuzzy": removed}
+                for tokens, removed in doc_buffer
+            ],
+            "data_stats": dict(stats),
+            "resume_state_before_batch": resume_state_before_batch,
+            "batch_stats": {
+                "target_tokens": B * T,
+                "removed_target_tokens": batch_removed_targets,
+                "has_removed_labels": bool(stats["has_removed_labels"]),
+            },
+        }
         gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)
         yield inputs, targets, state_dict
 
+
 def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
     """Helper that omits state_dict from yields."""
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
+    for inputs, targets, _ in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
         yield inputs, targets

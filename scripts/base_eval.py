@@ -35,7 +35,7 @@ from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir,
 from nanochat.tokenizer import HuggingFaceTokenizer, get_token_bytes
 from nanochat.checkpoint_manager import load_model
 from nanochat.core_eval import evaluate_task
-from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit
+from nanochat.dataloader import resolve_parquet_paths, tokenizing_distributed_data_loader_bos_bestfit
 from nanochat.megatron_dataloader import megatron_data_loader, _load_weights_arg
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
@@ -189,11 +189,20 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Global random seed for eval setup')
     parser.add_argument('--core-eval-seed', type=int, default=1337, help='Shuffle seed used before optional CORE subsampling')
     parser.add_argument('--data-source', type=str, default='parquet', choices=['parquet', 'megatron'], help='Data source for BPB eval')
-    parser.add_argument('--data-dir', type=str, default='', help='Data directory. For parquet: directory of nanochat-compatible .parquet shards. For megatron: directory containing .bin/.idx pairs')
+    parser.add_argument('--data-dir', type=str, default='', help='Legacy combined parquet directory, or Megatron data directory')
+    parser.add_argument('--train-data-dir', type=str, default='', help='Explicit parquet train directory; all parquet files are training files')
+    parser.add_argument('--val-data-dir', type=str, default='', help='Explicit parquet validation directory or parquet file')
     parser.add_argument('--domain-weights', type=str, default='proportional', help="(megatron only) 'proportional', 'uniform', JSON file path, or inline JSON")
     parser.add_argument('--train-fraction', type=float, default=0.99, help='(megatron only) fraction of each domain used for training')
     parser.add_argument('--pile-val-dir', type=str, default='', help='(megatron only) optional .bin/.idx directory for extra BPB eval')
     args = parser.parse_args()
+    explicit_parquet_data = bool(args.train_data_dir or args.val_data_dir)
+    if bool(args.train_data_dir) != bool(args.val_data_dir):
+        parser.error("--train-data-dir and --val-data-dir must be supplied together")
+    if explicit_parquet_data and args.data_dir:
+        parser.error("--train-data-dir/--val-data-dir are mutually exclusive with --data-dir")
+    if explicit_parquet_data and args.data_source != "parquet":
+        parser.error("explicit train/val parquet paths require --data-source=parquet")
 
     # Parse evaluation modes
     eval_modes = set(mode.strip() for mode in args.eval.split(','))
@@ -278,13 +287,29 @@ def main():
         steps = args.split_tokens // tokens_per_step
 
         if args.data_source == "parquet":
-            parquet_data_dir = args.data_dir or None
-            if parquet_data_dir:
-                print0(f"Parquet data dir: {parquet_data_dir}")
-            bpb_loaders = [
-                ("train", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "train", device=device, data_dir=parquet_data_dir)),
-                ("val", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "val", device=device, data_dir=parquet_data_dir)),
-            ]
+            if explicit_parquet_data:
+                train_paths = resolve_parquet_paths(args.train_data_dir)
+                val_paths = resolve_parquet_paths(args.val_data_dir)
+                print0(f"Explicit parquet train files: {len(train_paths)} from {args.train_data_dir}")
+                print0(f"Explicit parquet val files: {len(val_paths)} from {args.val_data_dir}")
+                bpb_loaders = [
+                    ("train", tokenizing_distributed_data_loader_bos_bestfit(
+                        tokenizer, args.device_batch_size, sequence_len, "train", device=device,
+                        parquet_paths=train_paths,
+                    )),
+                    ("val", tokenizing_distributed_data_loader_bos_bestfit(
+                        tokenizer, args.device_batch_size, sequence_len, "val", device=device,
+                        parquet_paths=val_paths,
+                    )),
+                ]
+            else:
+                parquet_data_dir = args.data_dir or None
+                if parquet_data_dir:
+                    print0(f"Parquet data dir: {parquet_data_dir}")
+                bpb_loaders = [
+                    ("train", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "train", device=device, data_dir=parquet_data_dir)),
+                    ("val", tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, "val", device=device, data_dir=parquet_data_dir)),
+                ]
         else:
             if not args.data_dir:
                 raise ValueError("--data-source=megatron requires --data-dir")

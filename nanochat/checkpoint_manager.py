@@ -40,8 +40,10 @@ def _patch_missing_keys(model_data, model_config):
         log0(f"Patching missing x0_lambdas in model data to 0.0")
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
+    # Every rank writes rank-local metadata/optimizer state, so the directory
+    # must exist before any rank enters its write path.
+    os.makedirs(checkpoint_dir, exist_ok=True)
     if rank == 0:
-        os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters
         model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
         torch.save(model_data, model_path)
@@ -51,6 +53,12 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_data, f, indent=2)
         logger.info(f"Saved metadata to: {meta_path}")
+    # Dataloader buffers/cursors differ by rank. Keep the rank-0 legacy file above
+    # for evaluation, and a rank-specific file for exact distributed resume.
+    rank_meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}_rank{rank:d}.json")
+    with open(rank_meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta_data, f)
+    logger.info(f"Saved rank metadata to: {rank_meta_path}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -68,7 +76,8 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
-    meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
+    rank_meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}_rank{rank:d}.json")
+    meta_path = rank_meta_path if os.path.isfile(rank_meta_path) else os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
     with open(meta_path, "r", encoding="utf-8") as f:
         meta_data = json.load(f)
     return model_data, optimizer_data, meta_data
