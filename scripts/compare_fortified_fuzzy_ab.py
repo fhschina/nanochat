@@ -591,25 +591,38 @@ def plot_interactive_validation(pairs, output: Path) -> None:
     fig.update_layout(
         title=dict(
             text=(
-                "FineWeb-EDU-Fortified fuzzy dedup × NanoChat d24 — interactive validation analysis"
-                "<br><sup>BPB panels default to a post-initialization zoom; double-click an axis to autoscale. "
-                "For BPB delta, negative favors fuzzy and positive favors raw.</sup>"
-            )
+                "FineWeb-EDU-Fortified: Fuzzy Dedup × NanoChat d24"
+                "<br><sup>Interactive validation analysis · ΔBPB = fuzzy − raw "
+                "(negative favors fuzzy)</sup>"
+            ),
+            x=0.5,
+            xanchor="center",
+            y=0.985,
+            yanchor="top",
+            font=dict(size=22),
         ),
         template="plotly_white",
         width=1320,
-        height=900,
+        height=980,
         hovermode="closest",
-        legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="left", x=0),
-        margin=dict(l=80, r=40, t=145, b=70),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.17,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
+        margin=dict(l=80, r=40, t=195, b=150),
         updatemenus=[
             dict(
                 type="buttons",
                 direction="right",
-                x=1,
-                xanchor="right",
-                y=1.15,
-                yanchor="top",
+                x=0.5,
+                xanchor="center",
+                y=1.07,
+                yanchor="bottom",
+                font=dict(size=12),
                 buttons=[
                     dict(label="Means + seeds", method="update", args=[{"visible": all_mask}]),
                     dict(label="Means ±1 SD", method="update", args=[{"visible": mean_mask}]),

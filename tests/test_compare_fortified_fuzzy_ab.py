@@ -72,6 +72,9 @@ def test_report_fixture_generates_required_outputs(tmp_path: Path):
     html = (output / "interactive_validation_analysis.html").read_text(encoding="utf-8")
     assert "fortified-validation-dashboard" in html
     assert "Paired BPB delta vs optimization time" in html
+    assert "FineWeb-EDU-Fortified: Fuzzy Dedup" in html
+    assert "Interactive validation analysis" in html
+    assert "BPB panels default to a post-initialization zoom" not in html
     report = (output / "final_report.md").read_text(encoding="utf-8")
     assert "exactly three individual points" in report
     assert "No significance p-value is reported for n=3" in report
