@@ -22,7 +22,7 @@ Mean raw target-token exposure to fuzzy-removed documents: **0.4145 ± 0.0000**.
 
 ![Validation BPB](val_bpb_vs_tokens.png)
 
-[Open the interactive validation dashboard](interactive_validation_analysis.html) — download and open locally for zoom, hover, seed/mean toggles, and paired deltas versus tokens or wall time.
+[Open the interactive validation dashboard](https://fhschina.github.io/nanochat/reports/semdedup_quality/fineweb_edu_fortified/fuzzy_ab/interactive_validation_analysis.html) — zoom, hover, toggle individual seeds versus cross-seed means, and inspect paired deltas versus tokens or wall time.
 
 ![Paired BPB delta](bpb_delta_vs_tokens.png)
 

@@ -1,0 +1,54 @@
+name: Deploy fuzzy-dedup report to GitHub Pages
+
+on:
+  push:
+    branches:
+      - semdedup-quality-experiments
+    paths:
+      - "reports/semdedup_quality/fineweb_edu_fortified/fuzzy_ab/**"
+      - ".github/workflows/fuzzy-ab-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the report branch
+        uses: actions/checkout@v6
+
+      - name: Stage only the fuzzy A/B report
+        shell: bash
+        run: |
+          report_dir="reports/semdedup_quality/fineweb_edu_fortified/fuzzy_ab"
+          publish_dir="_site/${report_dir}"
+          mkdir -p "${publish_dir}"
+          cp -a "${report_dir}/." "${publish_dir}/"
+          touch _site/.nojekyll
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
