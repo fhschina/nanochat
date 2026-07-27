@@ -589,21 +589,10 @@ def plot_interactive_validation(pairs, output: Path) -> None:
     mean_mask = [kind == "mean" for kind in trace_kinds]
     seed_mask = [kind == "seed" for kind in trace_kinds]
     fig.update_layout(
-        title=dict(
-            text=(
-                "FineWeb-EDU-Fortified: Fuzzy Dedup × NanoChat d24"
-                "<br><sup>Interactive validation analysis · ΔBPB = fuzzy − raw "
-                "(negative favors fuzzy)</sup>"
-            ),
-            x=0.5,
-            xanchor="center",
-            y=0.985,
-            yanchor="top",
-            font=dict(size=22),
-        ),
+        title=None,
         template="plotly_white",
-        width=1320,
-        height=980,
+        autosize=True,
+        height=900,
         hovermode="closest",
         legend=dict(
             orientation="h",
@@ -613,14 +602,14 @@ def plot_interactive_validation(pairs, output: Path) -> None:
             x=0.5,
             font=dict(size=11),
         ),
-        margin=dict(l=80, r=40, t=195, b=150),
+        margin=dict(l=80, r=40, t=120, b=150),
         updatemenus=[
             dict(
                 type="buttons",
                 direction="right",
                 x=0.5,
                 xanchor="center",
-                y=1.07,
+                y=1.08,
                 yanchor="bottom",
                 font=dict(size=12),
                 buttons=[
@@ -637,8 +626,52 @@ def plot_interactive_validation(pairs, output: Path) -> None:
         full_html=True,
         auto_open=False,
         div_id="fortified-validation-dashboard",
+        default_width="100%",
+        default_height="900px",
         config={"displaylogo": False, "responsive": True, "scrollZoom": True},
     )
+    header = """
+<header class="dashboard-header">
+  <h1>FineWeb-EDU-Fortified Fuzzy Dedup × NanoChat d24</h1>
+  <p>Interactive validation analysis · ΔBPB = fuzzy − raw · Negative favors fuzzy; positive favors raw</p>
+</header>
+"""
+    styles = """
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FineWeb-EDU-Fortified Fuzzy Dedup × NanoChat d24</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  .dashboard-header {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 24px 24px 4px;
+    text-align: center;
+    color: #2a3f5f;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .dashboard-header h1 {
+    margin: 0;
+    font-size: clamp(22px, 2.2vw, 34px);
+    font-weight: 500;
+    line-height: 1.2;
+  }
+  .dashboard-header p {
+    margin: 6px 0 0;
+    font-size: clamp(14px, 1.2vw, 18px);
+    font-weight: 400;
+    line-height: 1.35;
+  }
+  @media (max-width: 720px) {
+    .dashboard-header { padding: 16px 12px 0; }
+  }
+</style>
+"""
+    page = output.read_text(encoding="utf-8")
+    if page.count("</head>") != 1 or page.count("<body>") != 1:
+        raise RuntimeError("Unexpected Plotly HTML shell")
+    page = page.replace("</head>", f"{styles}</head>", 1)
+    page = page.replace("<body>", f"<body>{header}", 1)
+    output.write_text(page, encoding="utf-8")
 
 
 def plot_bpb_time(records, output):
