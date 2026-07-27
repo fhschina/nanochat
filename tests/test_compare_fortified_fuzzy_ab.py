@@ -66,7 +66,8 @@ def test_report_fixture_generates_required_outputs(tmp_path: Path):
         "final_report.md", "results.json", "run_results.csv", "val_bpb_vs_tokens.svg",
         "bpb_delta_vs_tokens.svg", "train_loss_vs_tokens.svg", "online_core_vs_tokens.svg",
         "val_bpb_vs_time.svg", "final_core.svg", "core_task_delta.svg",
-        "interactive_validation_analysis.html", "component_size_histogram.svg", "jaccard_ecdf.svg",
+        "interactive_validation_analysis.html", "interactive_core_analysis.html",
+        "component_size_histogram.svg", "jaccard_ecdf.svg",
     ):
         assert (output / name).is_file(), name
     html = (output / "interactive_validation_analysis.html").read_text(encoding="utf-8")
@@ -76,7 +77,13 @@ def test_report_fixture_generates_required_outputs(tmp_path: Path):
     assert "<h1>FineWeb-EDU-Fortified Fuzzy Dedup × NanoChat d24</h1>" in html
     assert "Interactive validation analysis" in html
     assert "BPB panels default to a post-initialization zoom" not in html
+    core_html = (output / "interactive_core_analysis.html").read_text(encoding="utf-8")
+    assert "fortified-core-dashboard" in core_html
+    assert "Final full CORE by paired seed" in core_html
+    assert "Per-task centered-accuracy paired deltas" in core_html
+    assert "seed 42 paired \\u0394" in core_html
     report = (output / "final_report.md").read_text(encoding="utf-8")
+    assert "Open the interactive LM Eval dashboard" in report
     assert "exactly three individual points" in report
     assert "No significance p-value is reported for n=3" in report
 

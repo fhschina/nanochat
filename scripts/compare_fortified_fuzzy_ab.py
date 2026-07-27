@@ -791,6 +791,309 @@ def plot_task_delta(pairs, output):
     plt.close(fig)
 
 
+def plot_interactive_core(pairs, output: Path) -> None:
+    """Write an interactive final-CORE and per-task paired-delta dashboard."""
+    task_sets = [
+        set(fuzzy.get("core_tasks", {})) & set(raw.get("core_tasks", {}))
+        for _, fuzzy, raw in pairs
+    ]
+    if not task_sets:
+        return
+    tasks = sorted(set.intersection(*task_sets))
+    if not tasks:
+        return
+
+    rows = []
+    for task in tasks:
+        seed_values = []
+        for seed, fuzzy, raw in pairs:
+            fuzzy_value = float(fuzzy["core_tasks"][task]["centered"])
+            raw_value = float(raw["core_tasks"][task]["centered"])
+            seed_values.append((int(seed), fuzzy_value, raw_value, fuzzy_value - raw_value))
+        values = np.asarray([row[3] for row in seed_values], dtype=float)
+        mean = float(values.mean())
+        sd = float(values.std(ddof=1)) if len(values) > 1 else 0.0
+        consistent = bool(np.all(values > 0) or np.all(values < 0))
+        rows.append((task, seed_values, mean, sd, consistent))
+    rows.sort(key=lambda row: row[2])
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        row_heights=[0.27, 0.73],
+        vertical_spacing=0.14,
+        subplot_titles=(
+            "Final full CORE by paired seed",
+            "Per-task centered-accuracy paired deltas",
+        ),
+    )
+    trace_kinds: list[str] = []
+
+    def add(trace, row: int, kind: str) -> None:
+        fig.add_trace(trace, row=row, col=1)
+        trace_kinds.append(kind)
+
+    seed_colors = {42: "#1f77b4", 43: "#9467bd", 44: "#ff7f0e"}
+    seed_symbols = {42: "circle", 43: "triangle-up", 44: "square"}
+
+    # Final full CORE: preserve the pairing by connecting fuzzy/raw for each seed.
+    for seed, fuzzy, raw in pairs:
+        fuzzy_core = float(fuzzy["metrics"]["final_core"])
+        raw_core = float(raw["metrics"]["final_core"])
+        paired_delta = fuzzy_core - raw_core
+        add(
+            go.Scatter(
+                x=["Fuzzy", "Raw"],
+                y=[fuzzy_core, raw_core],
+                mode="lines+markers",
+                name=f"seed {seed}",
+                legendgroup=f"core-seed-{seed}",
+                line=dict(color=seed_colors.get(int(seed), "#777"), width=1.5),
+                marker=dict(
+                    color=seed_colors.get(int(seed), "#777"),
+                    size=8,
+                    symbol=seed_symbols.get(int(seed), "circle"),
+                ),
+                opacity=0.58,
+                customdata=np.asarray([
+                    [int(seed), paired_delta],
+                    [int(seed), paired_delta],
+                ]),
+                hovertemplate=(
+                    "arm=%{x}<br>seed=%{customdata[0]:.0f}<br>final full CORE=%{y:.6f}"
+                    "<br>paired CORE delta (fuzzy − raw)=%{customdata[1]:+.6f}<extra></extra>"
+                ),
+            ),
+            1,
+            "seed",
+        )
+
+    arm_values = {
+        "Fuzzy": np.asarray([float(fuzzy["metrics"]["final_core"]) for _, fuzzy, _ in pairs]),
+        "Raw": np.asarray([float(raw["metrics"]["final_core"]) for _, _, raw in pairs]),
+    }
+    arm_means = np.asarray([arm_values["Fuzzy"].mean(), arm_values["Raw"].mean()])
+    arm_sds = np.asarray([
+        arm_values["Fuzzy"].std(ddof=1) if len(arm_values["Fuzzy"]) > 1 else 0.0,
+        arm_values["Raw"].std(ddof=1) if len(arm_values["Raw"]) > 1 else 0.0,
+    ])
+    add(
+        go.Scatter(
+            x=["Fuzzy", "Raw"],
+            y=arm_means,
+            mode="lines+markers",
+            name="cross-seed mean ±1 SD",
+            legendgroup="core-mean",
+            line=dict(color="#333", width=3),
+            marker=dict(color=[COLORS["fuzzy"], COLORS["raw"]], size=12, symbol="diamond"),
+            error_y=dict(type="data", array=arm_sds, visible=True, thickness=1.6, width=5),
+            customdata=np.column_stack([arm_sds, np.repeat(len(pairs), 2)]),
+            hovertemplate=(
+                "arm=%{x}<br>cross-seed mean CORE=%{y:.6f}"
+                "<br>sample SD=%{customdata[0]:.6f}<br>n=%{customdata[1]:.0f}<extra></extra>"
+            ),
+        ),
+        1,
+        "mean",
+    )
+
+    # Per-task paired deltas: one point per seed plus paired mean ±1 sample SD.
+    y = np.arange(len(rows), dtype=float)
+    seed_order = sorted({seed for _, seed_values, _, _, _ in rows for seed, *_ in seed_values})
+    seed_offsets = dict(zip(seed_order, np.linspace(-0.16, 0.16, max(len(seed_order), 1)), strict=True))
+    for seed in seed_order:
+        xs, ys, custom = [], [], []
+        for position, (task, seed_values, _, _, _) in zip(y, rows, strict=True):
+            value = next((value for value in seed_values if value[0] == seed), None)
+            if value is None:
+                continue
+            _, fuzzy_value, raw_value, delta = value
+            xs.append(delta)
+            ys.append(position + seed_offsets[seed])
+            custom.append([task, fuzzy_value, raw_value])
+        add(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="markers",
+                name=f"seed {seed} paired Δ",
+                legendgroup=f"core-seed-{seed}",
+                marker=dict(
+                    color=seed_colors.get(seed, "#777"),
+                    size=9,
+                    symbol=seed_symbols.get(seed, "circle"),
+                    line=dict(color="white", width=0.7),
+                ),
+                opacity=0.78,
+                customdata=np.asarray(custom, dtype=object),
+                hovertemplate=(
+                    f"task=%{{customdata[0]}}<br>paired seed={seed}"
+                    "<br>fuzzy centered accuracy=%{customdata[1]:.6f}"
+                    "<br>raw centered accuracy=%{customdata[2]:.6f}"
+                    "<br>delta (fuzzy − raw)=%{x:+.6f}<extra></extra>"
+                ),
+                showlegend=False,
+            ),
+            2,
+            "seed",
+        )
+
+    line_x, line_y = [], []
+    for position, (_, _, mean, _, _) in zip(y, rows, strict=True):
+        line_x.extend([0.0, mean, None])
+        line_y.extend([position, position, None])
+    add(
+        go.Scatter(
+            x=line_x,
+            y=line_y,
+            mode="lines",
+            line=dict(color="rgba(70,70,70,0.48)", width=1.5),
+            hoverinfo="skip",
+            showlegend=False,
+        ),
+        2,
+        "mean",
+    )
+
+    means = np.asarray([row[2] for row in rows])
+    sds = np.asarray([row[3] for row in rows])
+    mean_colors = ["#2ca02c" if value >= 0 else "#d62728" for value in means]
+    mean_symbols = ["diamond" if row[4] else "circle-open" for row in rows]
+    mean_custom = np.asarray([
+        [task, sd, "all seeds agree" if agrees else "mixed directions", len(seed_values)]
+        for task, seed_values, _, sd, agrees in rows
+    ], dtype=object)
+    add(
+        go.Scatter(
+            x=means,
+            y=y,
+            mode="markers",
+            name="paired mean ±1 SD",
+            legendgroup="task-mean",
+            marker=dict(
+                color=mean_colors,
+                size=12,
+                symbol=mean_symbols,
+                line=dict(width=1.6),
+            ),
+            error_x=dict(type="data", array=sds, visible=True, color="#555", thickness=1.3, width=4),
+            customdata=mean_custom,
+            hovertemplate=(
+                "task=%{customdata[0]}<br>mean paired delta=%{x:+.6f}"
+                "<br>sample SD=%{customdata[1]:.6f}<br>%{customdata[2]}"
+                "<br>n=%{customdata[3]:.0f}<extra></extra>"
+            ),
+        ),
+        2,
+        "mean",
+    )
+
+    fig.add_vline(x=0, line_color="#444", line_width=1, row=2, col=1)
+    fig.update_xaxes(title_text="Arm", row=1, col=1)
+    fig.update_yaxes(title_text="Final full CORE", row=1, col=1)
+    fig.update_xaxes(
+        title_text="Centered-accuracy Δ (fuzzy − raw); negative favors raw, positive favors fuzzy",
+        row=2,
+        col=1,
+    )
+    fig.update_yaxes(
+        tickmode="array",
+        tickvals=y,
+        ticktext=[row[0] for row in rows],
+        row=2,
+        col=1,
+    )
+
+    all_mask = [True] * len(trace_kinds)
+    mean_mask = [kind == "mean" for kind in trace_kinds]
+    seed_mask = [kind == "seed" for kind in trace_kinds]
+    height = max(1050, 510 + len(rows) * 31)
+    fig.update_layout(
+        title=None,
+        template="plotly_white",
+        autosize=True,
+        height=height,
+        hovermode="closest",
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.08,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=11),
+        ),
+        margin=dict(l=190, r=55, t=125, b=125),
+        updatemenus=[
+            dict(
+                type="buttons",
+                direction="right",
+                x=0.5,
+                xanchor="center",
+                y=1.07,
+                yanchor="bottom",
+                font=dict(size=12),
+                buttons=[
+                    dict(label="Means + seeds", method="update", args=[{"visible": all_mask}]),
+                    dict(label="Means ±1 SD", method="update", args=[{"visible": mean_mask}]),
+                    dict(label="Individual seeds", method="update", args=[{"visible": seed_mask}]),
+                ],
+            )
+        ],
+    )
+    fig.write_html(
+        output,
+        include_plotlyjs=True,
+        full_html=True,
+        auto_open=False,
+        div_id="fortified-core-dashboard",
+        default_width="100%",
+        default_height=f"{height}px",
+        config={"displaylogo": False, "responsive": True, "scrollZoom": True},
+    )
+    header = """
+<header class="dashboard-header">
+  <h1>FineWeb-EDU-Fortified Fuzzy Dedup × NanoChat d24</h1>
+  <p>Interactive LM Eval Harness analysis · Final full CORE and per-task paired centered-accuracy deltas</p>
+</header>
+"""
+    styles = """
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FineWeb-EDU-Fortified Fuzzy Dedup × NanoChat d24 · LM Eval</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  .dashboard-header {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 24px 24px 4px;
+    text-align: center;
+    color: #2a3f5f;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  .dashboard-header h1 {
+    margin: 0;
+    font-size: clamp(22px, 2.2vw, 34px);
+    font-weight: 500;
+    line-height: 1.2;
+  }
+  .dashboard-header p {
+    margin: 6px 0 0;
+    font-size: clamp(14px, 1.2vw, 18px);
+    font-weight: 400;
+    line-height: 1.35;
+  }
+  @media (max-width: 720px) {
+    .dashboard-header { padding: 16px 12px 0; }
+  }
+</style>
+"""
+    page = output.read_text(encoding="utf-8")
+    if page.count("</head>") != 1 or page.count("<body>") != 1:
+        raise RuntimeError("Unexpected Plotly HTML shell")
+    page = page.replace("</head>", f"{styles}</head>", 1)
+    page = page.replace("<body>", f"<body>{header}", 1)
+    output.write_text(page, encoding="utf-8")
+
+
 def plot_dataset_audits(audit_json: Path, pairs_jsonl: Path, output_dir: Path):
     if audit_json.is_file():
         audit = load_json(audit_json)
@@ -840,6 +1143,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         plot_bpb_time(records, output / "val_bpb_vs_time.svg")
         plot_final_core(records, output / "final_core.svg")
         plot_task_delta(pairs, output / "core_task_delta.svg")
+        plot_interactive_core(pairs, output / "interactive_core_analysis.html")
     plot_dataset_audits(args.component_audit, args.pair_audit, output)
 
     run_rows = []
@@ -931,6 +1235,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "![Validation BPB versus optimization time](val_bpb_vs_time.png)",
         "",
         "## LM Eval Harness Results",
+        "",
+        "[Open the interactive LM Eval dashboard](https://fhschina.github.io/nanochat/reports/semdedup_quality/fineweb_edu_fortified/fuzzy_ab/interactive_core_analysis.html) — hover over final CORE and per-task paired deltas, and toggle cross-seed means versus individual seeds.",
         "",
         "![Final CORE](final_core.png)",
         "",

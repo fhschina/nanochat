@@ -34,6 +34,8 @@ Mean raw target-token exposure to fuzzy-removed documents: **0.4145 ± 0.0000**.
 
 ## LM Eval Harness Results
 
+[Open the interactive LM Eval dashboard](https://fhschina.github.io/nanochat/reports/semdedup_quality/fineweb_edu_fortified/fuzzy_ab/interactive_core_analysis.html) — hover over final CORE and per-task paired deltas, and toggle cross-seed means versus individual seeds.
+
 ![Final CORE](final_core.png)
 
 ![Per-task CORE delta](core_task_delta.png)
