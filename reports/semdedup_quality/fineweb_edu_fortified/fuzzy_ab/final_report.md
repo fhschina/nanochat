@@ -1,6 +1,6 @@
 # FineWeb-EDU-Fortified fuzzy dedup × NanoChat d24
 
-Generated: 2026-07-24T19:27:24.113534+00:00
+Generated: 2026-07-27T20:10:59.490522+00:00
 
 ## Executive summary
 
@@ -22,6 +22,8 @@ Mean raw target-token exposure to fuzzy-removed documents: **0.4145 ± 0.0000**.
 
 ![Validation BPB](val_bpb_vs_tokens.png)
 
+[Open the interactive validation dashboard](interactive_validation_analysis.html) — download and open locally for zoom, hover, seed/mean toggles, and paired deltas versus tokens or wall time.
+
 ![Paired BPB delta](bpb_delta_vs_tokens.png)
 
 ![Training loss diagnostic](train_loss_vs_tokens.png)
@@ -35,6 +37,8 @@ Mean raw target-token exposure to fuzzy-removed documents: **0.4145 ± 0.0000**.
 ![Final CORE](final_core.png)
 
 ![Per-task CORE delta](core_task_delta.png)
+
+Each benchmark row contains exactly three individual points: the paired centered-accuracy deltas for seeds 42, 43, and 44 (`fuzzy - raw` within the same seed). The colored diamond/circle is their paired mean and the horizontal error bar is ±1 sample SD. A filled diamond means all three seeds agree in direction; an open circle means mixed directions. No significance p-value is reported for n=3.
 
 ## Dataset Analysis
 

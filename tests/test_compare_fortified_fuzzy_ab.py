@@ -66,9 +66,15 @@ def test_report_fixture_generates_required_outputs(tmp_path: Path):
         "final_report.md", "results.json", "run_results.csv", "val_bpb_vs_tokens.svg",
         "bpb_delta_vs_tokens.svg", "train_loss_vs_tokens.svg", "online_core_vs_tokens.svg",
         "val_bpb_vs_time.svg", "final_core.svg", "core_task_delta.svg",
-        "component_size_histogram.svg", "jaccard_ecdf.svg",
+        "interactive_validation_analysis.html", "component_size_histogram.svg", "jaccard_ecdf.svg",
     ):
         assert (output / name).is_file(), name
+    html = (output / "interactive_validation_analysis.html").read_text(encoding="utf-8")
+    assert "fortified-validation-dashboard" in html
+    assert "Paired BPB delta vs optimization time" in html
+    report = (output / "final_report.md").read_text(encoding="utf-8")
+    assert "exactly three individual points" in report
+    assert "No significance p-value is reported for n=3" in report
 
 
 
