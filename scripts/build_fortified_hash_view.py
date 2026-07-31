@@ -17,7 +17,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import xxhash
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 HASH_SPACE = 1 << 128
 OUTPUT_COLUMNS = ("text", "subset", "doc_id", "nanochat_token_count", "shuffle_hash")
 _SCAN_CONTEXT: dict[str, Any] = {}
@@ -97,6 +97,37 @@ def validation_hashes(path: Path) -> tuple[set[bytes], int]:
     return hashes, docs
 
 
+def load_contamination_manifest(path: Path | None) -> tuple[set[tuple[str, str]], dict[str, Any] | None, str | None]:
+    if path is None:
+        return set(), None, None
+    resolved = path.expanduser().resolve()
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    if payload.get("status") != "complete":
+        raise RuntimeError(f"Contamination manifest is not complete: {resolved}")
+    keys_name = payload.get("excluded_keys_file")
+    if not keys_name:
+        raise ValueError(f"Contamination manifest has no excluded_keys_file: {resolved}")
+    keys_path = Path(keys_name)
+    if not keys_path.is_absolute():
+        keys_path = resolved.parent / keys_path
+    keys: set[tuple[str, str]] = set()
+    with keys_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            key = (str(row["subset"]), str(row["doc_id"]))
+            if key in keys:
+                raise RuntimeError(f"Duplicate contamination key at {keys_path}:{line_number}: {key}")
+            keys.add(key)
+    expected = payload.get("excluded_training_docs")
+    if expected is not None and len(keys) != int(expected):
+        raise RuntimeError(
+            f"Contamination key count {len(keys):,} does not match manifest {int(expected):,}"
+        )
+    return keys, payload, sha256_file(resolved)
+
+
 def empty_buffers(buckets: int) -> list[dict[str, list]]:
     return [{name: [] for name in OUTPUT_COLUMNS} for _ in range(buckets)]
 
@@ -135,7 +166,10 @@ def configure_scan_context(
     lower: int,
     upper: int,
     num_buckets: int,
-    shuffle_seed: int,
+    selection_seed: int,
+    order_seed: int,
+    subsets: set[str],
+    contamination_keys: set[tuple[str, str]],
     validation_hashes_set: set[bytes],
     staging: Path,
     buffer_rows: int,
@@ -145,7 +179,10 @@ def configure_scan_context(
         "lower": lower,
         "upper": upper,
         "num_buckets": num_buckets,
-        "shuffle_seed": shuffle_seed,
+        "selection_seed": selection_seed,
+        "order_seed": order_seed,
+        "subsets": subsets,
+        "contamination_keys": contamination_keys,
         "validation_hashes": validation_hashes_set,
         "staging": staging,
         "buffer_rows": buffer_rows,
@@ -159,7 +196,10 @@ def scan_partition(task: tuple[int, list[tuple[int, str]]]) -> dict[str, int]:
     lower = int(_SCAN_CONTEXT["lower"])
     upper = int(_SCAN_CONTEXT["upper"])
     num_buckets = int(_SCAN_CONTEXT["num_buckets"])
-    shuffle_seed = int(_SCAN_CONTEXT["shuffle_seed"])
+    selection_seed = int(_SCAN_CONTEXT["selection_seed"])
+    order_seed = int(_SCAN_CONTEXT["order_seed"])
+    subsets = _SCAN_CONTEXT["subsets"]
+    contamination_keys = _SCAN_CONTEXT["contamination_keys"]
     val_hashes = _SCAN_CONTEXT["validation_hashes"]
     staging = Path(_SCAN_CONTEXT["staging"])
     buffer_rows = int(_SCAN_CONTEXT["buffer_rows"])
@@ -172,6 +212,10 @@ def scan_partition(task: tuple[int, list[tuple[int, str]]]) -> dict[str, int]:
         "scanned_docs": 0,
         "selected_docs": 0,
         "selected_tokens": 0,
+        "excluded_subset_docs": 0,
+        "excluded_subset_tokens": 0,
+        "excluded_contamination_docs": 0,
+        "excluded_contamination_tokens": 0,
         "excluded_val_docs": 0,
         "excluded_val_tokens": 0,
     }
@@ -188,21 +232,30 @@ def scan_partition(task: tuple[int, list[tuple[int, str]]]) -> dict[str, int]:
                 rows["text"], rows["subset"], rows["doc_id"], rows["nanochat_token_count"], strict=True
             ):
                 stats["scanned_docs"] += 1
-                digest_int = stable_hash(subset, doc_id, shuffle_seed)
-                if digest_int < lower or digest_int >= upper:
-                    continue
                 tokens = int(tokens)
+                if subsets and subset not in subsets:
+                    stats["excluded_subset_docs"] += 1
+                    stats["excluded_subset_tokens"] += tokens
+                    continue
+                selection_digest = stable_hash(subset, doc_id, selection_seed)
+                if selection_digest < lower or selection_digest >= upper:
+                    continue
+                if (subset, doc_id) in contamination_keys:
+                    stats["excluded_contamination_docs"] += 1
+                    stats["excluded_contamination_tokens"] += tokens
+                    continue
                 if text_hash(text) in val_hashes:
                     stats["excluded_val_docs"] += 1
                     stats["excluded_val_tokens"] += tokens
                     continue
-                bucket = bucket_for(digest_int, lower, upper, num_buckets)
+                order_digest = stable_hash(subset, doc_id, order_seed)
+                bucket = bucket_for(order_digest, 0, HASH_SPACE, num_buckets)
                 target = buffers[bucket]
                 target["text"].append(text)
                 target["subset"].append(subset)
                 target["doc_id"].append(doc_id)
                 target["nanochat_token_count"].append(tokens)
-                target["shuffle_hash"].append(digest_int.to_bytes(16, "big"))
+                target["shuffle_hash"].append(order_digest.to_bytes(16, "big"))
                 buffered_rows += 1
                 stats["selected_docs"] += 1
                 stats["selected_tokens"] += tokens
@@ -344,20 +397,70 @@ def merge_nested(rows: Iterable[dict[str, dict[str, int]]]) -> dict[str, dict[st
     return dict(sorted(merged.items()))
 
 
+def rank_capacity(files: list[Path], world_size: int, sequence_length: int) -> dict[str, Any]:
+    if world_size <= 0 or sequence_length <= 0:
+        raise ValueError("world_size and sequence_length must be positive")
+    source_tokens = [0] * world_size
+    source_docs = [0] * world_size
+    for path in files:
+        parquet = pq.ParquetFile(path)
+        if "nanochat_token_count" not in parquet.schema_arrow.names:
+            raise ValueError(f"{path} has no nanochat_token_count column")
+        for row_group in range(parquet.num_row_groups):
+            rank = row_group % world_size
+            column = parquet.read_row_group(row_group, columns=["nanochat_token_count"])[0]
+            source_tokens[rank] += int(pc.sum(column).as_py() or 0)
+            source_docs[rank] += len(column)
+    row_capacity = sequence_length + 1
+    target_tokens = [(tokens // row_capacity) * sequence_length for tokens in source_tokens]
+    return {
+        "world_size": world_size,
+        "sequence_length": sequence_length,
+        "per_rank": [
+            {
+                "rank": rank,
+                "docs": source_docs[rank],
+                "source_tokens": source_tokens[rank],
+                "consumable_target_tokens": target_tokens[rank],
+            }
+            for rank in range(world_size)
+        ],
+        "total_consumable_target_tokens": sum(target_tokens),
+        "min_rank_consumable_target_tokens": min(target_tokens),
+    }
+
+
 def build(args: argparse.Namespace) -> dict[str, Any]:
     source_root = args.source_root.expanduser().resolve()
     output = args.output_dir.expanduser().resolve()
     validation = args.validation_file.expanduser().resolve()
     fuzzy_view = args.fuzzy_view_dir.expanduser().resolve() if args.fuzzy_view_dir else None
+    contamination_path = (
+        args.contamination_manifest.expanduser().resolve()
+        if getattr(args, "contamination_manifest", None)
+        else None
+    )
+    selection_seed = int(getattr(args, "selection_seed", getattr(args, "shuffle_seed", 20260722)))
+    order_seed = int(getattr(args, "order_seed", selection_seed))
+    subsets = sorted(set(getattr(args, "subset", None) or []))
+    capacity_world_size = int(getattr(args, "capacity_world_size", 8))
+    capacity_seq_len = int(getattr(args, "capacity_seq_len", 2048))
+    target_token_capacity = int(getattr(args, "target_token_capacity", 0))
     manifest_path = output / "view_manifest.json"
     config = {
         "arm": args.arm,
         "source_root": str(source_root),
         "validation_file": str(validation),
-        "shuffle_seed": args.shuffle_seed,
+        "contamination_manifest": str(contamination_path) if contamination_path else None,
+        "subsets": subsets,
+        "selection_seed": selection_seed,
+        "order_seed": order_seed,
         "hash_start": args.hash_start,
         "hash_end": args.hash_end,
         "num_buckets": args.num_buckets,
+        "capacity_world_size": capacity_world_size,
+        "capacity_seq_len": capacity_seq_len,
+        "target_token_capacity": target_token_capacity,
     }
     if manifest_path.is_file() and not args.overwrite:
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -384,13 +487,17 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     source_manifest = next((path for path in source_manifest_candidates if path.is_file()), None)
     lower, upper = hash_bounds(args.hash_start, args.hash_end)
     val_hashes, val_docs = validation_hashes(validation)
+    contamination_keys, contamination_payload, contamination_sha256 = load_contamination_manifest(contamination_path)
     files = source_files(source_root)
     workers = min(max(1, int(getattr(args, "workers", 1))), len(files))
     configure_scan_context(
         lower=lower,
         upper=upper,
         num_buckets=args.num_buckets,
-        shuffle_seed=args.shuffle_seed,
+        selection_seed=selection_seed,
+        order_seed=order_seed,
+        subsets=set(subsets),
+        contamination_keys=contamination_keys,
         validation_hashes_set=val_hashes,
         staging=staging,
         buffer_rows=args.buffer_rows,
@@ -408,6 +515,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     scanned_docs = sum(row["scanned_docs"] for row in scan_rows)
     selected_docs = sum(row["selected_docs"] for row in scan_rows)
     selected_tokens = sum(row["selected_tokens"] for row in scan_rows)
+    excluded_subset_docs = sum(row["excluded_subset_docs"] for row in scan_rows)
+    excluded_subset_tokens = sum(row["excluded_subset_tokens"] for row in scan_rows)
+    excluded_contamination_docs = sum(row["excluded_contamination_docs"] for row in scan_rows)
+    excluded_contamination_tokens = sum(row["excluded_contamination_tokens"] for row in scan_rows)
     excluded_val_docs = sum(row["excluded_val_docs"] for row in scan_rows)
     excluded_val_tokens = sum(row["excluded_val_tokens"] for row in scan_rows)
     print(
@@ -425,6 +536,22 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("compacted totals do not match staged totals")
     if args.min_source_tokens and total_tokens < args.min_source_tokens:
         raise RuntimeError(f"view has {total_tokens:,} tokens, below required {args.min_source_tokens:,}")
+    output_files = [output / row["file"] for row in bucket_rows]
+    capacity = rank_capacity(output_files, capacity_world_size, capacity_seq_len)
+    if target_token_capacity:
+        required_per_rank = (target_token_capacity + capacity_world_size - 1) // capacity_world_size
+        insufficient = [
+            row for row in capacity["per_rank"]
+            if row["consumable_target_tokens"] < required_per_rank
+        ]
+        if insufficient:
+            detail = ", ".join(
+                f"rank {row['rank']}={row['consumable_target_tokens']:,}" for row in insufficient
+            )
+            raise RuntimeError(
+                f"view cannot provide {target_token_capacity:,} target tokens without rollover; "
+                f"required/rank={required_per_rank:,}; {detail}"
+            )
     removed_fraction = removed_tokens / total_tokens if total_tokens else 0.0
     if args.arm == "raw" and not args.skip_removal_fraction_gate:
         expected = args.expected_removed_token_fraction
@@ -443,10 +570,22 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "source_manifest": str(source_manifest) if source_manifest else None,
         "source_manifest_sha256": sha256_file(source_manifest) if source_manifest else None,
         "validation": {"file": str(validation), "sha256": sha256_file(validation), "docs": val_docs},
+        "contamination": {
+            "manifest": str(contamination_path) if contamination_path else None,
+            "manifest_sha256": contamination_sha256,
+            "config": contamination_payload.get("config") if contamination_payload else None,
+            "excluded_docs": excluded_contamination_docs,
+            "excluded_tokens": excluded_contamination_tokens,
+        },
         "scan": {"files": len(files), "docs": scanned_docs, "workers": workers},
+        "capacity": capacity,
         "selection": {
             "docs": total_docs,
             "tokens": total_tokens,
+            "excluded_subset_docs": excluded_subset_docs,
+            "excluded_subset_tokens": excluded_subset_tokens,
+            "excluded_contamination_docs": excluded_contamination_docs,
+            "excluded_contamination_tokens": excluded_contamination_tokens,
             "excluded_validation_overlap_docs": excluded_val_docs,
             "excluded_validation_overlap_tokens": excluded_val_tokens,
             "removed_docs": removed_docs,
@@ -471,13 +610,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--validation-file", type=Path, required=True)
     parser.add_argument("--fuzzy-view-dir", type=Path)
-    parser.add_argument("--shuffle-seed", type=int, default=20260722)
+    parser.add_argument("--contamination-manifest", type=Path)
+    parser.add_argument("--subset", action="append", help="Only include the named CC-MAIN-* subset (repeatable)")
+    parser.add_argument("--selection-seed", type=int, default=20260722)
+    parser.add_argument("--order-seed", type=int, default=20260723)
     parser.add_argument("--hash-start", type=float, default=0.0)
-    parser.add_argument("--hash-end", type=float, default=0.08)
+    parser.add_argument("--hash-end", type=float, default=1.0)
     parser.add_argument("--num-buckets", type=int, default=512)
     parser.add_argument("--buffer-rows", type=int, default=2_000_000)
     parser.add_argument("--workers", type=int, default=32)
     parser.add_argument("--min-source-tokens", type=int, default=0)
+    parser.add_argument("--target-token-capacity", type=int, default=0)
+    parser.add_argument("--capacity-world-size", type=int, default=8)
+    parser.add_argument("--capacity-seq-len", type=int, default=2048)
     parser.add_argument("--expected-removed-token-fraction", type=float, default=0.44475)
     parser.add_argument("--removed-token-fraction-tolerance", type=float, default=0.01)
     parser.add_argument("--skip-removal-fraction-gate", action="store_true")
@@ -485,6 +630,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.num_buckets <= 0 or args.buffer_rows <= 0 or args.workers <= 0:
         parser.error("--num-buckets, --buffer-rows, and --workers must be positive")
+    if args.target_token_capacity < 0 or args.capacity_world_size <= 0 or args.capacity_seq_len <= 0:
+        parser.error("capacity values must be non-negative/positive")
     if args.arm == "raw" and args.fuzzy_view_dir is None:
         parser.error("--arm=raw requires --fuzzy-view-dir")
     return args

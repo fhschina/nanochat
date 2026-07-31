@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -18,6 +19,8 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
+
+from scripts.experiment_fingerprints import training_code_sha256
 
 TOTAL_BATCH_SIZE = 1_048_576
 EXPECTED_STEPS = 6_612
@@ -67,17 +70,30 @@ def record_config(args: argparse.Namespace) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = args.train_manifest.expanduser().resolve()
     validation = args.validation_file.expanduser().resolve()
+    tokenizer = args.tokenizer_file.expanduser().resolve() if args.tokenizer_file else None
+    core_config = args.core_config_file.expanduser().resolve() if args.core_config_file else None
+    preflight = args.preflight_manifest.expanduser().resolve() if args.preflight_manifest else None
+    environment = load_json(args.environment_file.expanduser().resolve()) if args.environment_file else None
     payload = {
         "created_at": utc_now(),
         "arm": args.arm,
         "seed": args.seed,
         "kind": args.kind,
+        "condition": args.condition,
         "model_tag": args.model_tag,
         "git_commit": git_commit(),
+        "code_sha256": training_code_sha256(),
         "train_manifest": str(manifest),
         "train_manifest_sha256": sha256_file(manifest),
         "validation_file": str(validation),
         "validation_sha256": sha256_file(validation),
+        "tokenizer_file": str(tokenizer) if tokenizer else None,
+        "tokenizer_sha256": sha256_file(tokenizer) if tokenizer else None,
+        "core_config_file": str(core_config) if core_config else None,
+        "core_config_sha256": sha256_file(core_config) if core_config else None,
+        "preflight_manifest": str(preflight) if preflight else None,
+        "preflight_manifest_sha256": sha256_file(preflight) if preflight else None,
+        "environment": environment,
         "training": {
             "depth": args.depth,
             "num_iterations": args.num_iterations,
@@ -91,9 +107,28 @@ def record_config(args: argparse.Namespace) -> None:
             "core_eval_seed": args.core_eval_seed,
             "fp8": args.fp8,
             "window_pattern": args.window_pattern,
+            "require_fa3": args.require_fa3,
+            "audit_val_bpb_steps": args.audit_val_bpb_steps,
+            "preserve_checkpoint_steps": args.preserve_checkpoint_steps,
         },
     }
-    atomic_json(run_dir / "run_config.json", payload)
+    config_path = run_dir / "run_config.json"
+    if config_path.is_file():
+        existing = load_json(config_path)
+        def stable(value: dict[str, Any]) -> dict[str, Any]:
+            result = copy.deepcopy(value)
+            result.pop("created_at", None)
+            if result.get("environment"):
+                result["environment"] = {
+                    "compatibility": result["environment"].get("compatibility"),
+                    "compatibility_sha256": result["environment"].get("compatibility_sha256"),
+                }
+            return result
+        if stable(existing) != stable(payload):
+            raise RuntimeError(f"Run config fingerprint changed; refusing overwrite: {config_path}")
+        print(f"Verified existing run config: {config_path}")
+        return
+    atomic_json(config_path, payload)
 
 
 def parse_core_csv(path: Path) -> tuple[float | None, dict[str, dict[str, float]]]:
@@ -120,20 +155,21 @@ def parse_core_csv(path: Path) -> tuple[float | None, dict[str, dict[str, float]
 
 def summarize_run(run_dir: Path) -> dict[str, Any]:
     config = load_json(run_dir / "run_config.json")
+    total_batch_size = int(config["training"]["total_batch_size"])
     train_log = (run_dir / "train.log").read_text(errors="replace")
     eval_log = (run_dir / "base_eval.log").read_text(errors="replace") if (run_dir / "base_eval.log").is_file() else ""
     val_curve = [
-        {"step": int(step), "tokens": int(step) * TOTAL_BATCH_SIZE, "bpb": float(value)}
+        {"step": int(step), "tokens": int(step) * total_batch_size, "bpb": float(value)}
         for step, value in re.findall(r"Step\s+(\d+)\s+\|\s+Validation bpb:\s+([0-9.]+)", train_log)
     ]
     core_curve = [
-        {"step": int(step), "tokens": int(step) * TOTAL_BATCH_SIZE, "core": float(value)}
+        {"step": int(step), "tokens": int(step) * total_batch_size, "core": float(value)}
         for step, value in re.findall(r"Step\s+(\d+)\s+\|\s+CORE metric:\s+([+-]?[0-9.eE]+)", train_log)
     ]
     train_curve = [
         {
             "step": int(step),
-            "tokens": (int(step) + 1) * TOTAL_BATCH_SIZE,
+            "tokens": (int(step) + 1) * total_batch_size,
             "loss": float(loss),
             "runtime_sec": float(minutes) * 60,
         }
@@ -150,6 +186,20 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     loader_matches = re.findall(r"FINAL_DATA_LOADER_STATS\s+(\{[^\n]+\})", train_log)
     if loader_matches:
         loader_stats = json.loads(loader_matches[-1])
+    val_batch_audits = {}
+    for line in train_log.splitlines():
+        marker = "VAL_BPB_BATCH_AUDIT "
+        if marker in line:
+            payload = json.loads(line.split(marker, 1)[1])
+            val_batch_audits[str(int(payload["step"]))] = payload["batches"]
+    performance_rows = [
+        (int(step), int(tokens.replace(",", "")), float(wait_fraction))
+        for step, wait_fraction, tokens in re.findall(
+            r"step\s+(\d+)/\d+.*?data wait:\s+[0-9.]+ms\s+\(([0-9.]+)\).*?tok/sec:\s+([0-9,]+)",
+            train_log,
+        )
+        if int(step) > 10
+    ]
     iterations = re.findall(r"Using user-provided number of iterations:\s+([0-9,]+)", train_log)
     total_tokens = re.findall(r"Total number of training tokens:\s+([0-9,]+)", train_log)
     times = re.findall(r"Total training time:\s+([0-9.]+)m", train_log)
@@ -167,6 +217,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "run_dir": str(run_dir),
         "config": config,
         "curves": {"val_bpb": val_curve, "train_loss": train_curve, "online_core": core_curve},
+        "validation_batch_audits": val_batch_audits,
         "metrics": {
             "num_iterations": int(iterations[-1].replace(",", "")) if iterations else None,
             "training_tokens": int(total_tokens[-1].replace(",", "")) if total_tokens else None,
@@ -177,16 +228,40 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             "peak_memory_mib": float(peak[-1]) if peak else None,
             "final_data_exposure": final_exposure,
             "final_loader_stats": loader_stats,
+            "median_tokens_per_sec": float(np.median([row[1] for row in performance_rows])) if performance_rows else None,
+            "median_data_wait_fraction": float(np.median([row[2] for row in performance_rows])) if performance_rows else None,
         },
         "core_tasks": tasks,
     }
     if config["kind"] == "full":
-        if summary["metrics"]["num_iterations"] != EXPECTED_STEPS:
-            raise RuntimeError(f"{run_dir}: expected {EXPECTED_STEPS} steps")
-        if summary["metrics"]["training_tokens"] != EXPECTED_TOKENS:
-            raise RuntimeError(f"{run_dir}: expected {EXPECTED_TOKENS} training tokens")
-        if not val_curve or val_curve[0]["step"] != 0 or val_curve[-1]["step"] != EXPECTED_STEPS:
+        expected_steps = int(config["training"]["num_iterations"])
+        expected_tokens = expected_steps * total_batch_size
+        if summary["metrics"]["num_iterations"] != expected_steps:
+            raise RuntimeError(f"{run_dir}: expected {expected_steps} steps")
+        if summary["metrics"]["training_tokens"] != expected_tokens:
+            raise RuntimeError(f"{run_dir}: expected {expected_tokens} training tokens")
+        if not val_curve or val_curve[0]["step"] != 0 or val_curve[-1]["step"] != expected_steps:
             raise RuntimeError(f"{run_dir}: incomplete validation curve")
+        audited_steps = {
+            int(value) for value in config["training"].get("audit_val_bpb_steps", "").split(",") if value
+        }
+        if expected_steps in audited_steps and str(expected_steps) not in val_batch_audits:
+            raise RuntimeError(f"{run_dir}: final per-batch validation audit is missing")
+        if config.get("condition") != "legacy":
+            if not config.get("code_sha256"):
+                raise RuntimeError(f"{run_dir}: training code checksum is missing")
+            if not config.get("tokenizer_sha256"):
+                raise RuntimeError(f"{run_dir}: tokenizer checksum is missing")
+            if loader_stats is None:
+                raise RuntimeError(f"{run_dir}: final dataloader audit is missing")
+            if int(loader_stats.get("state_version", 0)) != 2:
+                raise RuntimeError(f"{run_dir}: expected dataloader state version 2")
+            if loader_stats.get("packer") != "bos_bestfit_continuation":
+                raise RuntimeError(f"{run_dir}: repaired continuation packer is not active")
+            if int(loader_stats.get("discarded_source_tokens", -1)) != 0:
+                raise RuntimeError(f"{run_dir}: discarded_source_tokens must be zero")
+            if int(loader_stats.get("consumed_epoch", -1)) != 1:
+                raise RuntimeError(f"{run_dir}: expected epoch 1 without rollover")
     atomic_json(run_dir / "run_summary.json", summary)
     return summary
 
@@ -205,6 +280,40 @@ def _table(headers: list[str], rows: list[list[Any]]) -> str:
     lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
     lines.extend("| " + " | ".join(str(value) for value in row) + " |" for row in rows)
     return "\n".join(lines)
+
+
+def paired_bpb_bootstrap(
+    fuzzy_batches: list[dict[str, float]],
+    raw_batches: list[dict[str, float]],
+    *,
+    repetitions: int = 10_000,
+    seed: int = 20_260_731,
+) -> dict[str, float | int]:
+    if len(fuzzy_batches) != len(raw_batches) or not fuzzy_batches:
+        raise ValueError("paired BPB bootstrap requires equal non-empty batch lists")
+    f_nats = np.asarray([row["nats"] for row in fuzzy_batches], dtype=np.float64)
+    f_bytes = np.asarray([row["bytes"] for row in fuzzy_batches], dtype=np.float64)
+    r_nats = np.asarray([row["nats"] for row in raw_batches], dtype=np.float64)
+    r_bytes = np.asarray([row["bytes"] for row in raw_batches], dtype=np.float64)
+    log2 = np.log(2.0)
+    observed = f_nats.sum() / (log2 * f_bytes.sum()) - r_nats.sum() / (log2 * r_bytes.sum())
+    rng = np.random.default_rng(seed)
+    deltas = np.empty(repetitions, dtype=np.float64)
+    for index in range(repetitions):
+        sample = rng.integers(0, len(f_nats), size=len(f_nats))
+        deltas[index] = (
+            f_nats[sample].sum() / (log2 * f_bytes[sample].sum())
+            - r_nats[sample].sum() / (log2 * r_bytes[sample].sum())
+        )
+    low, high = np.quantile(deltas, [0.025, 0.975])
+    return {
+        "observed_delta": float(observed),
+        "ci95_low": float(low),
+        "ci95_high": float(high),
+        "paired_batches": len(fuzzy_batches),
+        "bootstrap_repetitions": repetitions,
+        "bootstrap_seed": seed,
+    }
 
 
 def _curves_by_arm(records, name):
@@ -1119,15 +1228,16 @@ def plot_dataset_audits(audit_json: Path, pairs_jsonl: Path, output_dir: Path):
 def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     run_root = args.run_root.expanduser().resolve()
     output = args.output_dir.expanduser().resolve(); output.mkdir(parents=True, exist_ok=True)
+    seeds = tuple(getattr(args, "seed", None) or SEEDS)
     records = []
     for arm in ARMS:
-        for seed in SEEDS:
+        for seed in seeds:
             path = run_root / "full" / arm / f"seed_{seed}" / "run_summary.json"
             if path.is_file(): records.append(load_json(path))
     by_key = {(row["arm"], int(row["seed"])): row for row in records}
-    pairs = [(seed, by_key[("fuzzy", seed)], by_key[("raw", seed)]) for seed in SEEDS if ("fuzzy", seed) in by_key and ("raw", seed) in by_key]
-    if not args.allow_incomplete and len(pairs) != 3:
-        raise RuntimeError(f"Expected 3 completed pairs, found {len(pairs)}")
+    pairs = [(seed, by_key[("fuzzy", seed)], by_key[("raw", seed)]) for seed in seeds if ("fuzzy", seed) in by_key and ("raw", seed) in by_key]
+    if not args.allow_incomplete and len(pairs) != len(seeds):
+        raise RuntimeError(f"Expected {len(seeds)} completed pairs, found {len(pairs)}")
     if pairs:
         for seed, fuzzy, raw in pairs:
             if fuzzy["config"]["validation_sha256"] != raw["config"]["validation_sha256"]:
@@ -1198,13 +1308,27 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "raw_removed_target_fraction_mean": exp_mean,
         "raw_removed_target_fraction_sd": exp_sd,
     }
-    result = {"generated_at": utc_now(), "completed_pairs": len(pairs), "runs": records, "token_efficiency": token_efficiency, "conclusions": conclusions, "dataset": {"fuzzy": fuzzy_manifest, "raw": raw_manifest, "full_dedup": dedup_manifest}}
+    primary_endpoint = None
+    if len(pairs) == 1:
+        _, fuzzy, raw = pairs[0]
+        configured_steps = fuzzy.get("config", {}).get("training", {}).get("num_iterations")
+        final_step = str(int(configured_steps if configured_steps is not None else fuzzy["curves"]["val_bpb"][-1]["step"]))
+        fuzzy_batches = fuzzy.get("validation_batch_audits", {}).get(final_step)
+        raw_batches = raw.get("validation_batch_audits", {}).get(final_step)
+        if fuzzy_batches and raw_batches:
+            primary_endpoint = paired_bpb_bootstrap(fuzzy_batches, raw_batches)
+            primary_endpoint["step"] = int(final_step)
+            low, high = primary_endpoint["ci95_low"], primary_endpoint["ci95_high"]
+            primary_endpoint["interpretation"] = (
+                "fuzzy_advantage" if high < 0 else "raw_advantage" if low > 0 else "inconclusive"
+            )
+    result = {"generated_at": utc_now(), "completed_pairs": len(pairs), "runs": records, "token_efficiency": token_efficiency, "conclusions": conclusions, "primary_endpoint": primary_endpoint, "dataset": {"fuzzy": fuzzy_manifest, "raw": raw_manifest, "full_dedup": dedup_manifest}}
     atomic_json(output / "results.json", result)
     with (output / "run_results.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, lineterminator="\n"); writer.writerow(["seed","fuzzy_bpb","raw_bpb","delta_bpb","fuzzy_core","raw_core","delta_core","raw_removed_target_fraction"]); writer.writerows(run_rows)
 
     lines = [
-        "# FineWeb-EDU-Fortified fuzzy dedup × NanoChat d24",
+        f"# {getattr(args, 'report_title', 'FineWeb-EDU-Fortified fuzzy dedup × NanoChat d24')}",
         "",
         f"Generated: {result['generated_at']}",
         "",
@@ -1215,6 +1339,15 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         f"Mean paired final CORE delta: **{_fmt(core_mean,4)} ± {_fmt(core_sd,4)}**; higher is better.",
         f"Fuzzy reached the paired raw target earlier in **{conclusions['fuzzy_reaches_raw_target_earlier_seeds']}/{len(pairs)}** seeds.",
         f"Mean raw target-token exposure to fuzzy-removed documents: **{_fmt(exp_mean,4)} ± {_fmt(exp_sd,4)}**.",
+        "",
+        "## Pre-registered primary endpoint",
+        "",
+        (
+            f"Final paired BPB delta (fuzzy - raw): **{_fmt(primary_endpoint['observed_delta'])}**, "
+            f"paired-bootstrap 95% CI **[{_fmt(primary_endpoint['ci95_low'])}, {_fmt(primary_endpoint['ci95_high'])}]**, "
+            f"interpretation: **{primary_endpoint['interpretation']}**."
+            if primary_endpoint else "Final per-batch paired BPB audit is not available."
+        ),
         "",
         "## Run results",
         "",
@@ -1276,7 +1409,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "## Interpretation",
         "",
         "- Token efficiency is evaluated against each paired raw run's final BPB using a cumulative-min validation curve.",
-        "- Final BPB and CORE deltas are paired by model seed; all individual seeds are retained because n=3 is too small for a meaningful significance test.",
+        f"- Final BPB and CORE deltas are paired by model seed; this report contains {len(pairs)} paired seed(s).",
+        "- For the one-seed 4x experiment, the primary BPB interval resamples matched validation batches; it is not a cross-seed confidence interval.",
         "- Training loss is diagnostic only because the two arms see different document distributions.",
         "- Online CORE uses at most 500 examples per task; final CORE is the full evaluation.",
     ]
@@ -1287,10 +1421,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__); commands = root.add_subparsers(dest="command", required=True)
     record = commands.add_parser("record-config")
-    record.add_argument("--run-dir", type=Path, required=True); record.add_argument("--arm", choices=ARMS, required=True); record.add_argument("--seed", type=int, required=True); record.add_argument("--kind", choices=("smoke","full"), required=True); record.add_argument("--model-tag", required=True); record.add_argument("--train-manifest", type=Path, required=True); record.add_argument("--validation-file", type=Path, required=True)
-    record.add_argument("--depth", type=int, default=24); record.add_argument("--num-iterations", type=int, required=True); record.add_argument("--total-batch-size", type=int, default=TOTAL_BATCH_SIZE); record.add_argument("--max-seq-len", type=int, default=2048); record.add_argument("--device-batch-size", type=int, default=16); record.add_argument("--eval-every", type=int, default=250); record.add_argument("--eval-tokens", type=int, default=41_943_040); record.add_argument("--core-metric-every", type=int, default=1000); record.add_argument("--core-metric-max-per-task", type=int, default=500); record.add_argument("--core-eval-seed", type=int, default=1337); record.add_argument("--window-pattern", default="L"); record.add_argument("--fp8", action="store_true")
+    record.add_argument("--run-dir", type=Path, required=True); record.add_argument("--arm", choices=ARMS, required=True); record.add_argument("--seed", type=int, required=True); record.add_argument("--kind", choices=("smoke","resume_smoke","io_smoke","full"), required=True); record.add_argument("--condition", default="legacy"); record.add_argument("--model-tag", required=True); record.add_argument("--train-manifest", type=Path, required=True); record.add_argument("--validation-file", type=Path, required=True); record.add_argument("--tokenizer-file", type=Path); record.add_argument("--core-config-file", type=Path); record.add_argument("--preflight-manifest", type=Path); record.add_argument("--environment-file", type=Path)
+    record.add_argument("--depth", type=int, default=24); record.add_argument("--num-iterations", type=int, required=True); record.add_argument("--total-batch-size", type=int, default=TOTAL_BATCH_SIZE); record.add_argument("--max-seq-len", type=int, default=2048); record.add_argument("--device-batch-size", type=int, default=16); record.add_argument("--eval-every", type=int, default=250); record.add_argument("--eval-tokens", type=int, default=41_943_040); record.add_argument("--core-metric-every", type=int, default=1000); record.add_argument("--core-metric-max-per-task", type=int, default=500); record.add_argument("--core-eval-seed", type=int, default=1337); record.add_argument("--window-pattern", default="L"); record.add_argument("--fp8", action="store_true"); record.add_argument("--require-fa3", action="store_true"); record.add_argument("--audit-val-bpb-steps", default=""); record.add_argument("--preserve-checkpoint-steps", default="")
     summarize = commands.add_parser("summarize-run"); summarize.add_argument("--run-dir", type=Path, required=True)
-    report = commands.add_parser("report"); report.add_argument("--run-root", type=Path, required=True); report.add_argument("--output-dir", type=Path, required=True); report.add_argument("--fuzzy-manifest", type=Path, required=True); report.add_argument("--raw-manifest", type=Path, required=True); report.add_argument("--dedup-manifest", type=Path, required=True); report.add_argument("--component-audit", type=Path, required=True); report.add_argument("--pair-audit", type=Path, required=True); report.add_argument("--allow-incomplete", action="store_true")
+    report = commands.add_parser("report"); report.add_argument("--run-root", type=Path, required=True); report.add_argument("--output-dir", type=Path, required=True); report.add_argument("--fuzzy-manifest", type=Path, required=True); report.add_argument("--raw-manifest", type=Path, required=True); report.add_argument("--dedup-manifest", type=Path, required=True); report.add_argument("--component-audit", type=Path, required=True); report.add_argument("--pair-audit", type=Path, required=True); report.add_argument("--seed", type=int, action="append"); report.add_argument("--report-title", default="FineWeb-EDU-Fortified fuzzy dedup × NanoChat d24"); report.add_argument("--allow-incomplete", action="store_true")
     return root
 
 

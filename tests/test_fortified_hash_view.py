@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -20,11 +21,18 @@ def args_for(arm: str, source: Path, output: Path, validation: Path, fuzzy_view:
         validation_file=validation,
         fuzzy_view_dir=fuzzy_view,
         shuffle_seed=20260722,
+        selection_seed=20260722,
+        order_seed=20260723,
+        subset=None,
+        contamination_manifest=None,
         hash_start=0.0,
         hash_end=1.0,
         num_buckets=1,
         buffer_rows=2,
         min_source_tokens=0,
+        target_token_capacity=0,
+        capacity_world_size=1,
+        capacity_seq_len=4,
         expected_removed_token_fraction=0.44475,
         removed_token_fraction_tolerance=0.01,
         skip_removal_fraction_gate=True,
@@ -105,3 +113,74 @@ def test_parallel_scan_is_worker_count_insensitive(tmp_path: Path) -> None:
     assert single_table.equals(parallel_table)
     assert single["files"][0]["sha256"] == parallel["files"][0]["sha256"]
     assert single["selection"] == parallel["selection"]
+
+
+def test_subset_contamination_and_independent_order_seed(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    rows = [
+        {"text": "alpha", "subset": "CC-MAIN-2023-14", "doc_id": "a", "nanochat_token_count": 10},
+        {"text": "beta", "subset": "CC-MAIN-2023-14", "doc_id": "b", "nanochat_token_count": 10},
+        {"text": "gamma", "subset": "CC-MAIN-2023-14", "doc_id": "c", "nanochat_token_count": 10},
+        {"text": "other", "subset": "CC-MAIN-2023-50", "doc_id": "d", "nanochat_token_count": 10},
+    ]
+    write_rows(source / "part.parquet", rows)
+    validation = tmp_path / "val.parquet"
+    pq.write_table(pa.table({"text": ["not present"]}), validation)
+    keys = tmp_path / "excluded_keys.jsonl"
+    keys.write_text(json.dumps({"subset": "CC-MAIN-2023-14", "doc_id": "b"}) + "\n")
+    contamination = tmp_path / "contamination_manifest.json"
+    contamination.write_text(json.dumps({
+        "status": "complete",
+        "excluded_keys_file": keys.name,
+        "excluded_training_docs": 1,
+        "config": {"char_ngrams": 24, "num_bands": 20, "minhashes_per_band": 13},
+    }))
+
+    first_args = args_for("fuzzy", source, tmp_path / "first", validation)
+    first_args.subset = ["CC-MAIN-2023-14"]
+    first_args.contamination_manifest = contamination
+    first_args.selection_seed = 7
+    first_args.order_seed = 8
+    second_args = args_for("fuzzy", source, tmp_path / "second", validation)
+    second_args.subset = ["CC-MAIN-2023-14"]
+    second_args.contamination_manifest = contamination
+    second_args.selection_seed = 7
+    second_args.order_seed = 9
+
+    first = build(first_args)
+    second = build(second_args)
+    first_table = pq.read_table(tmp_path / "first" / "train_00000.parquet").to_pydict()
+    second_table = pq.read_table(tmp_path / "second" / "train_00000.parquet").to_pydict()
+    assert set(first_table["doc_id"]) == set(second_table["doc_id"]) == {"a", "c"}
+    assert first_table["shuffle_hash"] != second_table["shuffle_hash"]
+    assert first["selection"]["excluded_subset_docs"] == 1
+    assert first["selection"]["excluded_contamination_docs"] == 1
+    assert first["contamination"]["excluded_docs"] == 1
+    assert set(first["by_subset"]) == {"CC-MAIN-2023-14"}
+
+
+def test_target_capacity_gate_is_per_rank(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    rows = [
+        {"text": f"text {index}", "subset": "s", "doc_id": str(index), "nanochat_token_count": 5}
+        for index in range(2048)
+    ]
+    write_rows(source / "part.parquet", rows)
+    validation = tmp_path / "val.parquet"
+    pq.write_table(pa.table({"text": ["not present"]}), validation)
+    args = args_for("fuzzy", source, tmp_path / "view", validation)
+    args.capacity_world_size = 2
+    args.target_token_capacity = 8
+    manifest = build(args)
+    assert manifest["capacity"]["world_size"] == 2
+    assert all(row["consumable_target_tokens"] >= 4 for row in manifest["capacity"]["per_rank"])
+
+    failing = args_for("fuzzy", source, tmp_path / "too_large", validation)
+    failing.capacity_world_size = 2
+    failing.target_token_capacity = 12_000
+    try:
+        build(failing)
+    except RuntimeError as error:
+        assert "without rollover" in str(error)
+    else:
+        raise AssertionError("capacity gate should reject an undersized rank")
