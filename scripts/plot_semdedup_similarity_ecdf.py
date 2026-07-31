@@ -116,7 +116,7 @@ def _svg(
         else f"sim>={threshold:.2f} | removed {_fmt_int(output_stats['removed_documents'])} ({_fmt_pct(output_stats['removed_ratio'])})"
     )
     title_eps = f", eps={eps:g}" if eps is not None else ""
-    title = f"Semantic similarity ECDF - {dataset_label} (n170{title_eps})"
+    title = f"Semantic similarity ECDF - {dataset_label}{title_eps}"
     subtitle = (
         f"Total documents: {_fmt_int(output_stats['total_documents'])} | "
         f"Removed @ sim>={threshold:.2f}: {_fmt_int(output_stats['removed_documents'])} "

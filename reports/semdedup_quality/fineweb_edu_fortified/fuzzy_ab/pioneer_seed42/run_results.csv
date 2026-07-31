@@ -1,0 +1,2 @@
+arm,seed,steps,training_tokens,final_train_val_bpb,final_eval_val_bpb,minimum_validation_bpb,final_core,training_time_sec
+fuzzy,42,6612,6933184512,0.758105,0.758163,0.758105,0.240392,24367.8
