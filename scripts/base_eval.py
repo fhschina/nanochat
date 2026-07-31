@@ -188,6 +188,7 @@ def main():
     parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
     parser.add_argument('--seed', type=int, default=42, help='Global random seed for eval setup')
     parser.add_argument('--core-eval-seed', type=int, default=1337, help='Shuffle seed used before optional CORE subsampling')
+    parser.add_argument('--output-csv', type=str, default='', help='Explicit CORE CSV output path (avoids collisions between concurrent evaluations)')
     parser.add_argument('--data-source', type=str, default='parquet', choices=['parquet', 'megatron'], help='Data source for BPB eval')
     parser.add_argument('--data-dir', type=str, default='', help='Legacy combined parquet directory, or Megatron data directory')
     parser.add_argument('--train-data-dir', type=str, default='', help='Explicit parquet train directory; all parquet files are training files')
@@ -346,8 +347,11 @@ def main():
 
         # Write CSV output
         if ddp_rank == 0:
-            base_dir = get_base_dir()
-            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}.csv")
+            if args.output_csv:
+                output_csv_path = os.path.abspath(os.path.expanduser(args.output_csv))
+            else:
+                base_dir = get_base_dir()
+                output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}.csv")
             os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
             with open(output_csv_path, 'w', encoding='utf-8', newline='') as f:
                 f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered':<10}\n")

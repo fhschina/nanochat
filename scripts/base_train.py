@@ -14,6 +14,7 @@ python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1 -
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import gc
+import hashlib
 import json
 import time
 import math
@@ -26,11 +27,11 @@ import torch
 import torch.distributed as dist
 
 from nanochat.gpt import GPT, GPTConfig, Linear
-from nanochat.dataloader import resolve_parquet_paths, tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.dataloader import STAT_KEYS, resolve_parquet_paths, tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanochat.megatron_dataloader import megatron_data_loader, megatron_data_loader_with_state, _load_weights_arg
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_tokenizer, get_token_bytes
-from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
+from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint, prune_checkpoints
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
@@ -48,6 +49,7 @@ parser.add_argument("--seed", type=int, default=42, help="Global random seed for
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
+parser.add_argument("--require-fa3", action="store_true", help="abort unless Flash Attention 3 is active")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -70,6 +72,9 @@ parser.add_argument("--warmup-steps", type=int, default=40, help="number of step
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
 parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable)")
+parser.add_argument("--stop-after-step", type=int, default=-1, help="gracefully checkpoint and stop at this step while preserving the full LR horizon")
+parser.add_argument("--audit-batch-steps", default="", help="comma-separated steps whose rank-local x/y hashes are logged for resume audits")
+parser.add_argument("--audit-val-bpb-steps", default="", help="comma-separated validation steps whose reduced per-batch BPB numerators are logged")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
@@ -78,6 +83,8 @@ parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="e
 parser.add_argument("--core-eval-seed", type=int, default=1337, help="Shuffle seed used before optional CORE subsampling")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
+parser.add_argument("--keep-last-checkpoints", type=int, default=0, help="rolling non-final checkpoints to keep (0 = keep all)")
+parser.add_argument("--preserve-checkpoint-steps", default="", help="comma-separated checkpoint steps never removed by rolling retention")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 # Data source
@@ -85,7 +92,8 @@ parser.add_argument("--data-source", type=str, default="parquet", choices=["parq
 parser.add_argument("--data-dir", type=str, default="", help="Legacy combined parquet data directory, or Megatron data directory")
 parser.add_argument("--train-data-dir", type=str, default="", help="Explicit parquet train directory; all parquet files are training files")
 parser.add_argument("--val-data-dir", type=str, default="", help="Explicit parquet validation directory or parquet file")
-parser.add_argument("--fail-on-data-epoch-rollover", action="store_true", help="Abort if the explicit training view reaches epoch 2")
+parser.add_argument("--fail-on-data-epoch-rollover", action="store_true", help="Abort if the explicit training view consumes data from epoch 2")
+parser.add_argument("--require-zero-discarded-tokens", action="store_true", help="Abort if the packer reports silently discarded source tokens")
 parser.add_argument("--domain-weights", type=str, default="proportional", help="(megatron only) sampling weights across domains: 'proportional' (default), 'uniform', a JSON file path, or an inline JSON dict/list")
 parser.add_argument("--train-fraction", type=float, default=0.99, help="(megatron only) fraction of each domain's docs used for training; the rest is held out as val")
 parser.add_argument("--pile-val-dir", type=str, default="", help="(megatron only) optional second val source (e.g. pretokenized Pile val); reports val/bpb_pile alongside val/bpb")
@@ -97,6 +105,24 @@ if explicit_parquet_data and args.data_dir:
     parser.error("--train-data-dir/--val-data-dir are mutually exclusive with --data-dir")
 if explicit_parquet_data and args.data_source != "parquet":
     parser.error("explicit train/val parquet paths require --data-source=parquet")
+try:
+    audit_batch_steps = {int(value) for value in args.audit_batch_steps.split(",") if value.strip()}
+except ValueError as error:
+    parser.error(f"invalid --audit-batch-steps: {error}")
+if any(step < 0 for step in audit_batch_steps):
+    parser.error("--audit-batch-steps cannot contain negative steps")
+try:
+    audit_val_bpb_steps = {int(value) for value in args.audit_val_bpb_steps.split(",") if value.strip()}
+except ValueError as error:
+    parser.error(f"invalid --audit-val-bpb-steps: {error}")
+if any(step < 0 for step in audit_val_bpb_steps):
+    parser.error("--audit-val-bpb-steps cannot contain negative steps")
+try:
+    preserve_checkpoint_steps = {int(value) for value in args.preserve_checkpoint_steps.split(",") if value.strip()}
+except ValueError as error:
+    parser.error(f"invalid --preserve-checkpoint-steps: {error}")
+if any(step <= 0 for step in preserve_checkpoint_steps):
+    parser.error("--preserve-checkpoint-steps must contain positive steps")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -134,6 +160,8 @@ else:
         print0(f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Your GPU utilization will be terrible.")
         print0("WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.")
     print0("!" * 80)
+if args.require_fa3 and not using_fa3:
+    raise RuntimeError("--require-fa3 was set but Flash Attention 3 is not active")
 
 # -----------------------------------------------------------------------------
 # Tokenizer will be useful for evaluation and also we need the vocab size to init the model
@@ -420,7 +448,13 @@ elif args.target_param_data_ratio > 0:
     print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
 else:
     raise ValueError("No training horizon specified")
-total_tokens = total_batch_size * num_iterations # the actual number of tokens we will train for
+if args.stop_after_step != -1 and not (0 < args.stop_after_step <= num_iterations):
+    raise ValueError("--stop-after-step must be in (0, num_iterations]")
+if resuming and args.stop_after_step != -1 and args.stop_after_step <= args.resume_from_step:
+    raise ValueError("--stop-after-step must be greater than --resume-from-step")
+if any(step > num_iterations for step in preserve_checkpoint_steps):
+    raise ValueError("--preserve-checkpoint-steps cannot exceed the full training horizon")
+total_tokens = total_batch_size * num_iterations # the actual number of tokens in the full LR horizon
 print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num_scaling_params:.2f}") # e.g. Chinchilla was ~20
 print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
@@ -485,16 +519,45 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 
 # Go!
 while True:
-    last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
+    horizon_complete = step == num_iterations
+    requested_stop = args.stop_after_step != -1 and step == args.stop_after_step
+    last_step = horizon_complete or requested_stop
     flops_so_far = num_flops_per_token * total_batch_size * step
+
+    if step in audit_batch_steps:
+        digest = hashlib.sha256()
+        digest.update(x.detach().cpu().contiguous().numpy().tobytes())
+        digest.update(y.detach().cpu().contiguous().numpy().tobytes())
+        local_hash = digest.hexdigest()
+        rank_hashes = [None] * ddp_world_size if master_process else None
+        if is_ddp_initialized():
+            dist.gather_object(local_hash, rank_hashes, dst=0)
+        else:
+            rank_hashes = [local_hash]
+        print0("DATA_BATCH_AUDIT " + json.dumps({"step": step, "rank_sha256": rank_hashes}, sort_keys=True))
 
     # once in a while: evaluate the val bpb (all ranks participate)
     if args.eval_every > 0 and (last_step or step % args.eval_every == 0):
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+        audit_val_batches = step in audit_val_bpb_steps
         with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_result = evaluate_bpb(
+                model,
+                val_loader,
+                eval_steps,
+                token_bytes,
+                return_batch_stats=audit_val_batches,
+            )
+        if audit_val_batches:
+            val_bpb, val_batch_stats = val_result
+            print0("VAL_BPB_BATCH_AUDIT " + json.dumps({
+                "step": step,
+                "batches": val_batch_stats,
+            }, separators=(",", ":"), sort_keys=True))
+        else:
+            val_bpb = val_result
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -577,6 +640,18 @@ while True:
             },
             rank=ddp_rank,
         )
+        if args.keep_last_checkpoints > 0:
+            if is_ddp_initialized():
+                dist.barrier()
+            if master_process:
+                prune_checkpoints(
+                    checkpoint_dir,
+                    keep_last=args.keep_last_checkpoints,
+                    preserve_steps=preserve_checkpoint_steps | ({step} if last_step else set()),
+                    exclude_preserved_from_limit=True,
+                )
+            if is_ddp_initialized():
+                dist.barrier()
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
@@ -587,6 +662,7 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    data_wait_time = 0.0
     for micro_step in range(grad_accum_steps):
         batch_stats = dataloader_state_dict.get("batch_stats", {})
         consumed_data_stats["target_tokens"] += int(batch_stats.get("target_tokens", x.numel()))
@@ -599,9 +675,14 @@ while True:
             scaler.scale(loss).backward()
         else:
             loss.backward()
+        data_wait_start = time.perf_counter()
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
-        if explicit_parquet_data and args.fail_on_data_epoch_rollover and int(dataloader_state_dict.get("epoch", 1)) > 1:
-            raise RuntimeError("Explicit training view exhausted before the requested horizon (epoch rollover)")
+        data_wait_time += time.perf_counter() - data_wait_start
+        consumed_epoch = int(dataloader_state_dict.get("consumed_epoch", dataloader_state_dict.get("epoch", 1)))
+        if explicit_parquet_data and args.fail_on_data_epoch_rollover and consumed_epoch > 1:
+            raise RuntimeError("Explicit training view exhausted before the requested horizon (consumed epoch rollover)")
+        if args.require_zero_discarded_tokens and int(dataloader_state_dict.get("data_stats", {}).get("discarded_source_tokens", 0)):
+            raise RuntimeError("Packer reported discarded source tokens")
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
@@ -650,7 +731,8 @@ while True:
     else:
         eta_str = ""
     if "epoch" in dataloader_state_dict:
-        epoch = f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
+        consumed_epoch = dataloader_state_dict.get("consumed_epoch", dataloader_state_dict["epoch"])
+        epoch = f"consumed={consumed_epoch} cursor={dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
     else:
         # megatron loader state: per-domain epochs/cursors
         epochs_list = dataloader_state_dict.get("epochs", [])
@@ -658,7 +740,8 @@ while True:
             epoch = f"min={min(epochs_list)} max={max(epochs_list)}"
         else:
             epoch = "?"
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
+    data_wait_fraction = data_wait_time / dt if dt else 0.0
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | data wait: {data_wait_time * 1000:.2f}ms ({data_wait_fraction:.4f}) | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
     if step % 100 == 0:
         log_data = {
             "step": step,
@@ -667,6 +750,8 @@ while True:
             "train/loss": debiased_smooth_loss,
             "train/lrm": lrm,
             "train/dt": dt,
+            "train/data_wait": data_wait_time,
+            "train/data_wait_fraction": data_wait_fraction,
             "train/tok_per_sec": tok_per_sec,
             "train/mfu": mfu,
             "train/epoch": epoch,
@@ -723,21 +808,30 @@ if consumed_data_stats.get("has_removed_labels"):
     }, sort_keys=True))
 loader_stats = dataloader_state_dict.get("data_stats", {})
 if loader_stats:
-    loader_values = torch.tensor([
-        int(loader_stats.get(key, 0)) for key in (
-            "source_docs", "source_tokens", "removed_source_docs", "removed_source_tokens",
-            "target_tokens", "removed_target_tokens", "cropped_tokens", "removed_cropped_tokens",
-        )
-    ], dtype=torch.float64, device=device)
+    loader_values = torch.tensor(
+        [int(loader_stats.get(key, 0)) for key in STAT_KEYS],
+        dtype=torch.float64,
+        device=device,
+    )
+    consumed_epoch_value = torch.tensor(
+        int(dataloader_state_dict.get("consumed_epoch", dataloader_state_dict.get("epoch", 1))),
+        dtype=torch.int64,
+        device=device,
+    )
     if is_ddp_initialized():
         dist.all_reduce(loader_values, op=dist.ReduceOp.SUM)
-    loader_keys = (
-        "source_docs", "source_tokens", "removed_source_docs", "removed_source_tokens",
-        "target_tokens", "removed_target_tokens", "cropped_tokens", "removed_cropped_tokens",
-    )
-    print0("FINAL_DATA_LOADER_STATS " + json.dumps({
-        key: int(value) for key, value in zip(loader_keys, loader_values.tolist(), strict=True)
-    }, sort_keys=True))
+        dist.all_reduce(consumed_epoch_value, op=dist.ReduceOp.MAX)
+    loader_audit = {
+        key: int(value) for key, value in zip(STAT_KEYS, loader_values.tolist(), strict=True)
+    }
+    loader_audit.update({
+        "state_version": int(dataloader_state_dict.get("state_version", 1)),
+        "packer": dataloader_state_dict.get("packer", "legacy_bos_bestfit"),
+        "consumed_epoch": int(consumed_epoch_value.item()),
+    })
+    if args.require_zero_discarded_tokens and loader_audit["discarded_source_tokens"] != 0:
+        raise RuntimeError("Packer reported discarded source tokens")
+    print0("FINAL_DATA_LOADER_STATS " + json.dumps(loader_audit, sort_keys=True))
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
 if val_bpb is not None:

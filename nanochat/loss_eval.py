@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes):
+def evaluate_bpb(model, batches, steps, token_bytes, return_batch_stats=False):
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing
@@ -28,6 +28,7 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     total_nats = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())
     total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
     batch_iter = iter(batches)
+    batch_stats = []
     for _ in range(steps):
         x, y = next(batch_iter)
         loss2d = model(x, y, loss_reduction='none') # (B, T)
@@ -44,22 +45,33 @@ def evaluate_bpb(model, batches, steps, token_bytes):
                 token_bytes[y_safe],
                 torch.zeros_like(y, dtype=token_bytes.dtype)
             )
-            total_nats += (loss2d * (num_bytes2d > 0)).sum()
-            total_bytes += num_bytes2d.sum()
+            batch_nats = (loss2d * (num_bytes2d > 0)).sum()
+            batch_bytes = num_bytes2d.sum()
         else:
             # fast path: no ignored targets, safe to index directly
             num_bytes2d = token_bytes[y]
-            total_nats += (loss2d * (num_bytes2d > 0)).sum()
-            total_bytes += num_bytes2d.sum()
+            batch_nats = (loss2d * (num_bytes2d > 0)).sum()
+            batch_bytes = num_bytes2d.sum()
+        if return_batch_stats and dist.is_initialized():
+            dist.all_reduce(batch_nats, op=dist.ReduceOp.SUM)
+            dist.all_reduce(batch_bytes, op=dist.ReduceOp.SUM)
+        total_nats += batch_nats
+        total_bytes += batch_bytes
+        if return_batch_stats:
+            batch_stats.append({
+                "nats": float(batch_nats.item()),
+                "bytes": int(batch_bytes.item()),
+            })
     # sum reduce across all ranks
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    if world_size > 1:
+    if world_size > 1 and not return_batch_stats:
         dist.all_reduce(total_nats, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_bytes, op=dist.ReduceOp.SUM)
     # move both to cpu, calculate bpb and return
     total_nats = total_nats.item()
     total_bytes = total_bytes.item()
     if total_bytes == 0:
-        return float('inf')
+        result = float('inf')
+        return (result, batch_stats) if return_batch_stats else result
     bpb = total_nats / (math.log(2) * total_bytes)
-    return bpb
+    return (bpb, batch_stats) if return_batch_stats else bpb

@@ -11,13 +11,21 @@ import torch
 from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 
+DATALOADER_STATE_VERSION = 2
+
 STAT_KEYS = (
     "source_docs",
     "source_tokens",
     "removed_source_docs",
     "removed_source_tokens",
+    "consumed_source_tokens",
+    "input_tokens",
     "target_tokens",
     "removed_target_tokens",
+    "row_boundary_input_only_tokens",
+    "continuation_fragments",
+    "discarded_source_tokens",
+    # Legacy counters. Version-2 packers never increment these.
     "cropped_tokens",
     "removed_cropped_tokens",
 )
@@ -105,6 +113,7 @@ def _document_batches(
                     "removed_by_fuzzy": bool(removed[index]) if removed is not None else False,
                     "has_removed_label": removed is not None,
                     "declared_tokens": int(declared_tokens[index]) if declared_tokens is not None else None,
+                    "source_epoch": epoch,
                 }
                 for index in range(doc_offset, end)
             ]
@@ -156,11 +165,20 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         parquet_paths=parquet_paths,
     )
     bos_token = tokenizer.get_bos_token_id()
+    state_version = int(resume.get("state_version", 1))
     doc_buffer = [
-        (list(item["tokens"]), bool(item["removed_by_fuzzy"]))
+        (
+            list(item["tokens"]),
+            bool(item["removed_by_fuzzy"]),
+            bool(item.get("continuation", False)),
+            int(item.get("source_epoch", resume.get("consumed_epoch", 1))),
+        )
         for item in resume.get("doc_buffer", [])
     ]
     stats = {key: int(resume.get("data_stats", {}).get(key, 0)) for key in STAT_KEYS}
+    if state_version < DATALOADER_STATE_VERSION and "discarded_source_tokens" not in resume.get("data_stats", {}):
+        # Version 1 called silently discarded source tokens "cropped_tokens".
+        stats["discarded_source_tokens"] = stats["cropped_tokens"]
     stats["has_removed_labels"] = bool(
         resume.get("data_stats", {}).get("has_removed_labels", False)
     )
@@ -170,6 +188,29 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
             {"pq_idx": 0, "rg_idx": -1, "doc_offset": 0, "epoch": 1},
         )
     )
+    consumed_epoch = int(resume.get("consumed_epoch", 1))
+
+    def serialize_buffer():
+        return [
+            {
+                "tokens": tokens,
+                "removed_by_fuzzy": removed,
+                "continuation": continuation,
+                "source_epoch": source_epoch,
+            }
+            for tokens, removed, continuation, source_epoch in doc_buffer
+        ]
+
+    def snapshot_state():
+        return {
+            **source_state,
+            "state_version": DATALOADER_STATE_VERSION,
+            "packer": "bos_bestfit_continuation",
+            "source_state": dict(source_state),
+            "consumed_epoch": consumed_epoch,
+            "doc_buffer": serialize_buffer(),
+            "data_stats": dict(stats),
+        }
 
     def refill_buffer():
         nonlocal source_state
@@ -190,7 +231,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
             if removed:
                 stats["removed_source_docs"] += 1
                 stats["removed_source_tokens"] += len(tokens)
-            doc_buffer.append((tokens, removed))
+            doc_buffer.append((tokens, removed, False, int(record["source_epoch"])))
 
     use_cuda = device == "cuda" or str(device).startswith("cuda:")
     row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
@@ -203,63 +244,66 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     targets = gpu_buffer[B * T :].view(B, T)
 
     while True:
-        resume_state_before_batch = {
-            **source_state,
-            "source_state": dict(source_state),
-            "doc_buffer": [
-                {"tokens": tokens, "removed_by_fuzzy": removed}
-                for tokens, removed in doc_buffer
-            ],
-            "data_stats": dict(stats),
-        }
+        resume_state_before_batch = snapshot_state()
         for row_idx in range(B):
             pos = 0
             while pos < row_capacity:
                 while len(doc_buffer) < buffer_size:
                     refill_buffer()
                 remaining = row_capacity - pos
+                active_epoch = min(item[3] for item in doc_buffer)
                 best_idx = -1
                 best_len = 0
-                for index, (tokens, _) in enumerate(doc_buffer):
-                    if len(tokens) <= remaining and len(tokens) > best_len:
+                for index, (tokens, _, _, source_epoch) in enumerate(doc_buffer):
+                    if (
+                        source_epoch == active_epoch
+                        and len(tokens) <= remaining
+                        and len(tokens) > best_len
+                    ):
                         best_idx = index
                         best_len = len(tokens)
 
                 if best_idx >= 0:
-                    tokens, removed = doc_buffer.pop(best_idx)
+                    tokens, removed, continuation, source_epoch = doc_buffer.pop(best_idx)
                     used = len(tokens)
                 else:
                     shortest_idx = min(
-                        range(len(doc_buffer)), key=lambda index: len(doc_buffer[index][0])
+                        (
+                            index
+                            for index, item in enumerate(doc_buffer)
+                            if item[3] == active_epoch
+                        ),
+                        key=lambda index: len(doc_buffer[index][0]),
                     )
-                    tokens, removed = doc_buffer.pop(shortest_idx)
+                    tokens, removed, continuation, source_epoch = doc_buffer[shortest_idx]
                     used = remaining
-                    cropped = len(tokens) - used
-                    stats["cropped_tokens"] += cropped
-                    if removed:
-                        stats["removed_cropped_tokens"] += cropped
+                    remainder = tokens[used:]
+                    if not remainder:
+                        raise RuntimeError("best-fit continuation split produced an empty remainder")
+                    doc_buffer[shortest_idx] = (remainder, removed, True, source_epoch)
+                    stats["continuation_fragments"] += 1
                 row_buffer[row_idx, pos : pos + used] = torch.tensor(tokens[:used], dtype=torch.long)
                 origin_buffer[row_idx, pos : pos + used] = removed
                 pos += used
+                consumed_epoch = max(consumed_epoch, source_epoch)
 
         cpu_inputs.copy_(row_buffer[:, :-1])
         cpu_targets.copy_(row_buffer[:, 1:])
         batch_removed_targets = int(origin_buffer[:, 1:].sum().item())
+        stats["consumed_source_tokens"] += B * row_capacity
+        stats["input_tokens"] += B * T
         stats["target_tokens"] += B * T
         stats["removed_target_tokens"] += batch_removed_targets
+        stats["row_boundary_input_only_tokens"] += B
         state_dict = {
-            **source_state,
-            "source_state": dict(source_state),
-            "doc_buffer": [
-                {"tokens": tokens, "removed_by_fuzzy": removed}
-                for tokens, removed in doc_buffer
-            ],
-            "data_stats": dict(stats),
+            **snapshot_state(),
             "resume_state_before_batch": resume_state_before_batch,
             "batch_stats": {
                 "target_tokens": B * T,
                 "removed_target_tokens": batch_removed_targets,
                 "has_removed_labels": bool(stats["has_removed_labels"]),
+                "consumed_epoch": consumed_epoch,
+                "discarded_source_tokens": stats["discarded_source_tokens"],
             },
         }
         gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)

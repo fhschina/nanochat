@@ -66,6 +66,47 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
+def prune_checkpoints(
+    checkpoint_dir,
+    keep_last=2,
+    preserve_steps=None,
+    exclude_preserved_from_limit=False,
+):
+    """Remove complete checkpoint generations outside a small rolling window.
+
+    Only files matching NanoChat's model/meta/optimizer checkpoint names are
+    eligible. This deliberately leaves logs and unrelated artifacts untouched.
+    """
+    if keep_last < 0:
+        raise ValueError("keep_last must be non-negative")
+    preserve = {int(step) for step in (preserve_steps or set())}
+    model_paths = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
+    steps = sorted(
+        int(match.group(1))
+        for path in model_paths
+        if (match := re.fullmatch(r"model_(\d{6})\.pt", os.path.basename(path)))
+    )
+    candidates = [step for step in steps if step not in preserve]
+    keep = set(candidates[-keep_last:]) if keep_last else set()
+    if not exclude_preserved_from_limit:
+        keep.update(preserve)
+        if len(keep) > keep_last and keep_last:
+            keep = set(sorted(keep)[-keep_last:])
+    else:
+        keep.update(preserve)
+
+    removed = []
+    checkpoint_name = re.compile(r"(?:model|meta|optim)_(\d{6})(?:_rank\d+)?\.(?:pt|json)")
+    for path in glob.glob(os.path.join(checkpoint_dir, "*")):
+        match = checkpoint_name.fullmatch(os.path.basename(path))
+        if match is None or int(match.group(1)) in keep:
+            continue
+        os.remove(path)
+        removed.append(path)
+    log0(f"Pruned {len(removed)} checkpoint files; retained steps={sorted(keep)}")
+    return {"kept_steps": sorted(keep), "removed_files": sorted(removed)}
+
+
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the model state
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
