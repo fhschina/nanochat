@@ -183,10 +183,7 @@ $$
 The primary metric is weighted removal precision:
 
 $$
-\text{Removal Precision}
-=
-\frac{\sum w_{ij}\mathbf{1}(y_{ij}=\text{safe replacement})}
-{\sum w_{ij}}
+\text{Removal Precision} = \frac{\sum w_{ij}\mathbf{1}(y_{ij}=\text{safe replacement})}{\sum w_{ij}}
 $$
 
 $$
