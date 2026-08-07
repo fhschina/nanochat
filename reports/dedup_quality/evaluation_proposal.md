@@ -238,11 +238,7 @@ Report this stream separately from Section 5.3. Section 5.3 estimates the safety
 
 ## 5.5 Global-Random Sentinel — Optional
 
-Uniformly sample a small number of unordered pairs from the full corpus pair universe:
-
-$$
-\{(i,j):i<j\}
-$$
+Uniformly sample a small number of unordered document pairs `(i, j)` with `i < j` from the full corpus pair universe.
 
 This method-independent sample provides a rough background estimate and a check on assumptions made by retrieval-based sampling. It is not the main precision or recall estimator: true duplicates are usually too rare in uniformly random pairs for a small sample to have high yield.
 
